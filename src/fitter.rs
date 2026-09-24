@@ -95,7 +95,9 @@ pub struct Fitter {
 impl Fitter {
     /// Reads the data histogram and the Glauber tree given in `config`.
     pub fn new(config: FitConfig) -> Result<Self> {
-        let data_file = FileReader::open(&config.data_file)?;
+        let data_file = FileReader::open(&config.data_file).map_err(|e| {
+            Error::Input(format!("cannot open {}: {e}", config.data_file.display()))
+        })?;
         let data = TH1::read_root(&data_file, &config.data_hist)?;
         let n_events = match config.n_events {
             Some(n) => n,

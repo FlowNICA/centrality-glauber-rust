@@ -16,7 +16,8 @@ use crate::error::Error;
 /// | `NcollFast` | Ncoll^f / 100^f            |
 /// | `STAR`      | (1-f)*Npart/2 + f*Ncoll    |
 /// | `HADES`     | (1 - f*Npart^2)*Npart      |
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub enum Mode {
     Default,
     Psd,
@@ -98,6 +99,14 @@ impl FromStr for Mode {
                     names.join(", ")
                 ))
             })
+    }
+}
+
+impl TryFrom<String> for Mode {
+    type Error = Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 

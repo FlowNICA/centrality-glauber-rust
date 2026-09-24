@@ -59,7 +59,8 @@ impl GlauberEvents {
     /// `B`, `Npart` and `Ncoll` are required; missing `Ecc*`/`Psi*` branches
     /// are skipped with a warning.
     pub fn load(path: &Path, tree_name: &str, n_events: Option<usize>) -> Result<Self> {
-        let file = FileReader::open(path)?;
+        let file = FileReader::open(path)
+            .map_err(|e| Error::Input(format!("cannot open {}: {e}", path.display())))?;
         let tree = TreeReader::open(&file, tree_name)?;
         let n_total = tree.num_entries() as usize;
         let n = n_events.map_or(n_total, |n| n.min(n_total));

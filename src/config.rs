@@ -1,5 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
+use crate::config_file;
 use crate::error::{Error, Result};
 use crate::mode::Mode;
 
@@ -7,7 +10,8 @@ use crate::mode::Mode;
 const MAX_SCAN_POINTS: usize = 100_000;
 
 /// Scan of one fit parameter: `min, min + step, ... <= max`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScanRange {
     pub min: f32,
     pub max: f32,
@@ -68,7 +72,7 @@ impl ScanRange {
 /// As in the original framework the sampling always uses a Gamma distribution
 /// with mean `mu` and NBD-like parameter `k`; this only names the output
 /// histogram (`gamma` or `nbd`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 pub enum Distribution {
     #[default]
     Gamma,
@@ -127,11 +131,27 @@ impl FitConfig {
     pub fn builder() -> FitConfigBuilder {
         FitConfigBuilder::default()
     }
+
+    /// Name of the section of the shared RON file read by `bin/fit`.
+    pub const RON_SECTION: &'static str = "fit";
+
+    /// Reads and validates the [`RON_SECTION`](Self::RON_SECTION) section of
+    /// a RON configuration file, see `config.ron`.
+    pub fn from_ron_file(path: impl AsRef<Path>) -> Result<Self> {
+        let builder: FitConfigBuilder =
+            config_file::read_section(path.as_ref(), Self::RON_SECTION)?;
+        builder.expand_home().build()
+    }
 }
 
 /// Builder for [`FitConfig`]. The input files and object names are required,
 /// everything else defaults to the values of the original `config.c`.
-#[derive(Debug, Clone)]
+///
+/// It can also be deserialized from the `fit` section of a RON file
+/// ([`FitConfig::from_ron_file`], [`FitConfigBuilder::from_ron_str`]);
+/// omitted fields keep their defaults.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct FitConfigBuilder {
     glauber_file: Option<PathBuf>,
     glauber_tree: Option<String>,
@@ -142,7 +162,9 @@ pub struct FitConfigBuilder {
     f: ScanRange,
     k: ScanRange,
     p: ScanRange,
+    #[serde(rename = "mult_min")]
     fit_min_bin: usize,
+    #[serde(rename = "mult_max")]
     fit_max_bin: usize,
     bin_size: f32,
     mode: Mode,
@@ -177,6 +199,26 @@ impl Default for FitConfigBuilder {
 }
 
 impl FitConfigBuilder {
+    /// Parses the `fit` section of a RON configuration (other sections are
+    /// ignored). `Option` fields may be written without `Some(...)`, and a
+    /// leading `~/` in the file paths is expanded to `$HOME`.
+    pub fn from_ron_str(text: &str) -> Result<Self> {
+        let builder: Self = config_file::parse_section(text, FitConfig::RON_SECTION)
+            .map_err(|e| Error::Config(e.to_string()))?;
+        Ok(builder.expand_home())
+    }
+
+    fn expand_home(mut self) -> Self {
+        for path in [&mut self.glauber_file, &mut self.data_file]
+            .into_iter()
+            .flatten()
+            .chain([&mut self.out_dir])
+        {
+            *path = expand_home(path);
+        }
+        self
+    }
+
     /// MC-Glauber input: ROOT file and tree name.
     pub fn glauber(mut self, file: impl Into<PathBuf>, tree: impl Into<String>) -> Self {
         self.glauber_file = Some(file.into());
@@ -336,6 +378,14 @@ impl FitConfigBuilder {
     }
 }
 
+/// Replaces a leading `~` with `$HOME`.
+fn expand_home(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +419,46 @@ mod tests {
         assert!(base().k_range(0., 1., 0.1).build().is_err());
         assert!(base().f_range(0., 1., 0.).build().is_err());
         assert!(base().n_iter(0).build().is_err());
+    }
+
+    #[test]
+    fn shipped_config_ron_matches_config_c() {
+        let text = include_str!("../config.ron");
+        let c = FitConfigBuilder::from_ron_str(text)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(c.glauber_tree, "nt_Au3_Au3");
+        assert_eq!(c.data_hist, "hRefMult");
+        assert_eq!(c.n_iter, 20);
+        assert_eq!(c.f, ScanRange::new(0.1, 0.1, 0.01));
+        assert_eq!(c.k, ScanRange::new(0.5, 1.0, 0.01));
+        assert_eq!(c.p, ScanRange::new(0.001, 0.05, 0.001));
+        assert_eq!((c.fit_min_bin, c.fit_max_bin), (10, 110));
+        assert_eq!(c.mode, Mode::Star);
+        assert_eq!(c.distribution, Distribution::Gamma);
+        assert!(!c.glauber_file.starts_with("~"));
+    }
+
+    #[test]
+    fn ron_partial_and_errors() {
+        let c = FitConfigBuilder::from_ron_str(
+            r#"(
+                other_step: (whatever: [1, 2], mode: 3),
+                fit: (glauber_file: "g.root", glauber_tree: "t", data_file: "d.root",
+                      data_hist: "h", mode: "hades", n_threads: 3, seed: 5),
+            )"#,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(c.mode, Mode::Hades);
+        assert_eq!((c.n_threads, c.seed), (3, Some(5)));
+        assert_eq!(c.n_iter, 20);
+
+        assert!(FitConfigBuilder::from_ron_str("(fit: (typo_field: 1))").is_err());
+        assert!(FitConfigBuilder::from_ron_str(r#"(fit: (mode: "nope"))"#).is_err());
+        assert!(FitConfigBuilder::from_ron_str(r#"(glauber_file: "g.root")"#).is_err());
     }
 
     #[test]
