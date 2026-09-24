@@ -119,9 +119,6 @@ pub struct FitConfig {
     pub mode: Mode,
     /// Number of worker threads.
     pub n_threads: usize,
-    /// Number of Glauber events used to build the model multiplicity.
-    /// `None` means 10 times the data integral in the fit range.
-    pub n_events: Option<usize>,
     pub distribution: Distribution,
     /// Seed of the random generator; `None` gives a different seed every run.
     pub seed: Option<u64>,
@@ -169,7 +166,6 @@ pub struct FitConfigBuilder {
     bin_size: f32,
     mode: Mode,
     n_threads: Option<usize>,
-    n_events: Option<usize>,
     distribution: Distribution,
     seed: Option<u64>,
 }
@@ -191,7 +187,6 @@ impl Default for FitConfigBuilder {
             bin_size: 1.,
             mode: Mode::Star,
             n_threads: None,
-            n_events: None,
             distribution: Distribution::Gamma,
             seed: None,
         }
@@ -291,13 +286,6 @@ impl FitConfigBuilder {
         self
     }
 
-    /// Number of Glauber events used to build the model multiplicity;
-    /// defaults to 10 times the data integral in the fit range.
-    pub fn n_events(mut self, n_events: usize) -> Self {
-        self.n_events = Some(n_events);
-        self
-    }
-
     pub fn distribution(mut self, distribution: Distribution) -> Self {
         self.distribution = distribution;
         self
@@ -352,9 +340,6 @@ impl FitConfigBuilder {
         if n_threads == 0 {
             return Err(Error::Config("n_threads must be at least 1".into()));
         }
-        if self.n_events == Some(0) {
-            return Err(Error::Config("n_events must be at least 1".into()));
-        }
 
         Ok(FitConfig {
             glauber_file,
@@ -371,7 +356,6 @@ impl FitConfigBuilder {
             bin_size: self.bin_size,
             mode: self.mode,
             n_threads,
-            n_events: self.n_events,
             distribution: self.distribution,
             seed: self.seed,
         })

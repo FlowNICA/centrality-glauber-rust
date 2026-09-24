@@ -20,16 +20,24 @@ pub mod output;
 
 pub use config::{Distribution, FitConfig, FitConfigBuilder, ScanRange};
 pub use error::{Error, Result};
-pub use fitter::{FitParams, FitResult, Fitter, ModelHistograms, ScanPoint};
+pub use fitter::{FitParams, FitProgress, FitResult, Fitter, ModelHistograms, ScanPoint};
 pub use glauber::GlauberEvents;
 pub use mode::Mode;
 
 /// Runs the whole fit: reads the inputs, fits, and writes the scan file and
-/// the QA file into `config.out_dir`.
+/// the QA file into `config.out_dir`. The fit progress is printed to stdout.
 pub fn run(config: FitConfig) -> Result<FitResult> {
+    run_with_progress(config, &FitProgress::print)
+}
+
+/// Same as [`run`], reporting the fit progress to `progress`.
+pub fn run_with_progress(
+    config: FitConfig,
+    progress: &(dyn Fn(FitProgress) + Sync),
+) -> Result<FitResult> {
     std::fs::create_dir_all(&config.out_dir)?;
     let fitter = Fitter::new(config)?;
-    let result = fitter.fit()?;
+    let result = fitter.fit_with_progress(progress)?;
 
     let scan_path = output::scan_file_path(fitter.config());
     output::write_scan(&scan_path, &result.scan)?;

@@ -2,8 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use centrality_rust::FitConfig;
+use centrality_rust::{FitConfig, FitProgress};
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 /// Fit a data multiplicity distribution with an MC-Glauber based model.
 #[derive(Parser, Debug)]
@@ -17,7 +18,37 @@ fn main() -> ExitCode {
     let start = Instant::now();
     let args = Args::parse();
     println!("fit: using configuration {}", args.config.display());
-    let result = FitConfig::from_ron_file(&args.config).and_then(centrality_rust::run);
+    let bar = ProgressBar::hidden();
+    let progress = |p: FitProgress| match p {
+        FitProgress::Start { total } => {
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "{spinner} [{elapsed_precise}] [{wide_bar}] {percent}% {msg} (ETA {eta})",
+                )
+                .expect("valid progress bar template")
+                .progress_chars("=> "),
+            );
+            bar.set_length(total);
+            bar.set_message("initialization");
+            bar.reset();
+            bar.set_draw_target(ProgressDrawTarget::stderr());
+        }
+        FitProgress::Step => bar.inc(1),
+        FitProgress::Initialized { .. } => {
+            bar.set_message("initialized");
+            println_above(&bar, p);
+        }
+        FitProgress::Iteration {
+            iter, n_iter, chi2, ..
+        } => {
+            bar.set_message(format!("iteration {iter}/{n_iter}, chi2/ndf = {chi2:.4}"));
+            println_above(&bar, p);
+        }
+        FitProgress::Finish => bar.finish_and_clear(),
+    };
+    let result = FitConfig::from_ron_file(&args.config)
+        .and_then(|config| centrality_rust::run_with_progress(config, &progress));
+    bar.finish_and_clear();
     match result {
         Ok(r) => {
             println!();
@@ -33,5 +64,16 @@ fn main() -> ExitCode {
             eprintln!("Error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Prints the status line of `p` above the progress bar, or plainly if the bar
+/// is not drawn (e.g. stderr is not a terminal).
+fn println_above(bar: &ProgressBar, p: FitProgress) {
+    let Some(line) = p.status_line() else { return };
+    if bar.is_hidden() {
+        println!("{line}");
+    } else {
+        bar.println(line);
     }
 }

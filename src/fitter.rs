@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use oxiroot::prelude::*;
 use rand::rngs::SmallRng;
@@ -57,6 +57,58 @@ pub struct FitResult {
     pub scan: Vec<ScanPoint>,
 }
 
+/// Progress of [`Fitter::fit_with_progress`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FitProgress {
+    /// The scan starts; `total` work units will be done.
+    Start { total: u64 },
+    /// One work unit (a chunk of the events for one `mu` evaluation) is done.
+    /// Reported from the worker threads.
+    Step,
+    /// The first two golden section points of all grid points are evaluated.
+    Initialized { elapsed: Duration },
+    /// Golden section iteration `iter` (1-based) is done.
+    Iteration {
+        iter: u32,
+        n_iter: u32,
+        best: FitParams,
+        chi2: f64,
+        elapsed: Duration,
+    },
+    /// The scan is done.
+    Finish,
+}
+
+impl FitProgress {
+    /// Status line for the initialization and iteration events.
+    pub fn status_line(&self) -> Option<String> {
+        match self {
+            Self::Initialized { elapsed } => {
+                Some(format!("FitGlauber: initialization done ({elapsed:.1?})"))
+            }
+            Self::Iteration {
+                iter,
+                n_iter,
+                best,
+                chi2,
+                elapsed,
+            } => Some(format!(
+                "FitGlauber: iteration [{iter}/{n_iter}] best chi2/ndf = {chi2:.4} \
+                 (f = {} mu = {:.4} k = {} p = {}) ({elapsed:.1?})",
+                best.f, best.mu, best.k, best.p
+            )),
+            _ => None,
+        }
+    }
+
+    /// Prints the status lines to stdout.
+    pub fn print(self) {
+        if let Some(line) = self.status_line() {
+            println!("{line}");
+        }
+    }
+}
+
 /// Model histograms for one set of parameters, normalized to the data in the
 /// fit range.
 #[derive(Debug, Clone)]
@@ -99,10 +151,7 @@ impl Fitter {
             Error::Input(format!("cannot open {}: {e}", config.data_file.display()))
         })?;
         let data = TH1::read_root(&data_file, &config.data_hist)?;
-        let n_events = match config.n_events {
-            Some(n) => n,
-            None => default_n_events(&data, &config)?,
-        };
+        let n_events = required_n_events(&data, &config)?;
         let events =
             GlauberEvents::load(&config.glauber_file, &config.glauber_tree, Some(n_events))?;
         Self::with_inputs(config, data, events)
@@ -115,19 +164,13 @@ impl Fitter {
                 "data histogram must have uniform binning".into(),
             ));
         }
-        let requested = match config.n_events {
-            Some(n) => n,
-            None => default_n_events(&data, &config)?,
-        };
-        let n_events = requested.min(events.len());
-        if n_events < requested {
-            eprintln!(
-                "Warning: {requested} Glauber events requested, only {} available, using them",
+        let n_events = required_n_events(&data, &config)?;
+        if events.len() < n_events {
+            return Err(Error::Input(format!(
+                "not enough Glauber events: {} available, at least {n_events} \
+                 (10 x data integral in the fit range) needed",
                 events.len()
-            );
-        }
-        if n_events == 0 {
-            return Err(Error::Input("no Glauber events".into()));
+            )));
         }
 
         /* last non-empty data bin */
@@ -219,7 +262,13 @@ impl Fitter {
     ///
     /// All grid points are fitted simultaneously: in each iteration the
     /// multiplicity distributions for all grid points are built in parallel.
+    /// The progress is printed to stdout.
     pub fn fit(&self) -> Result<FitResult> {
+        self.fit_with_progress(&FitProgress::print)
+    }
+
+    /// Same as [`Fitter::fit`], reporting the progress to `progress`.
+    pub fn fit_with_progress(&self, progress: &(dyn Fn(FitProgress) + Sync)) -> Result<FitResult> {
         let mode = self.config.mode;
         let npart_max = self.npart_histo.xaxis.xmax.trunc();
         let ncoll_max = self.ncoll_histo.xaxis.xmax.trunc();
@@ -260,12 +309,19 @@ impl Fitter {
             return Err(Error::Input("no valid (f, k, p) points to fit".into()));
         }
 
-        let start = Instant::now();
-        let counts = self.build_counts(&grid, &evals, 0);
-        self.update_chi2(&mut grid, &evals, &counts);
-        println!("FitGlauber: initialization done ({:.1?})", start.elapsed());
-
+        /* 2 evaluations per valid grid point at initialization, then 1 per iteration */
         let n_iter = self.config.n_iter;
+        let n_valid = evals.len() / 2;
+        let total = self.n_units(2 * n_valid) + n_iter as u64 * self.n_units(n_valid);
+        progress(FitProgress::Start { total });
+
+        let start = Instant::now();
+        let counts = self.build_counts(&grid, &evals, 0, progress);
+        self.update_chi2(&mut grid, &evals, &counts);
+        progress(FitProgress::Initialized {
+            elapsed: start.elapsed(),
+        });
+
         for j in 0..n_iter {
             evals.clear();
             for (g, gp) in grid.iter_mut().enumerate().filter(|(_, gp)| gp.valid) {
@@ -293,22 +349,26 @@ impl Fitter {
                     });
                 }
             }
-            let counts = self.build_counts(&grid, &evals, j as u64 + 1);
+            let counts = self.build_counts(&grid, &evals, j as u64 + 1, progress);
             self.update_chi2(&mut grid, &evals, &counts);
 
             if let Some(best) = best_point(&grid) {
                 let (mu, chi2, _) = best.optimum();
-                println!(
-                    "FitGlauber: iteration [{}/{n_iter}] best chi2/ndf = {chi2:.4} \
-                     (f = {} mu = {mu:.4} k = {} p = {}) ({:.1?})",
-                    j + 1,
-                    best.f,
-                    best.k,
-                    best.p,
-                    start.elapsed()
-                );
+                progress(FitProgress::Iteration {
+                    iter: j + 1,
+                    n_iter,
+                    best: FitParams {
+                        f: best.f,
+                        mu: mu as f32,
+                        k: best.k,
+                        p: best.p,
+                    },
+                    chi2,
+                    elapsed: start.elapsed(),
+                });
             }
         }
+        progress(FitProgress::Finish);
 
         let scan: Vec<ScanPoint> = grid
             .iter()
@@ -502,9 +562,15 @@ impl Fitter {
     /// Model multiplicity counts for all evaluations. Work units are
     /// (evaluation, chunk of events); the events are split into chunks only if
     /// there are fewer evaluations than threads.
-    fn build_counts(&self, grid: &[GridPoint], evals: &[Evaluation], stream: u64) -> Vec<Vec<f64>> {
+    fn build_counts(
+        &self,
+        grid: &[GridPoint],
+        evals: &[Evaluation],
+        stream: u64,
+        progress: &(dyn Fn(FitProgress) + Sync),
+    ) -> Vec<Vec<f64>> {
         let n_events = self.n_events;
-        let n_chunks = self.config.n_threads.div_ceil(evals.len()).max(1);
+        let n_chunks = self.n_chunks(evals.len());
         let units: Vec<(usize, usize)> = (0..n_chunks)
             .flat_map(|c| (0..evals.len()).map(move |e| (e, c)))
             .collect();
@@ -526,6 +592,7 @@ impl Fitter {
                     self.simulate(&sampler, gp.p, main, pool, &mut rng, |_, n_hits, _| {
                         counts[self.axis.find_bin(n_hits)] += 1.;
                     });
+                    progress(FitProgress::Step);
                     (e, counts)
                 })
                 .collect()
@@ -538,6 +605,16 @@ impl Fitter {
             }
         }
         counts
+    }
+
+    /// Number of event chunks per evaluation in [`Fitter::build_counts`].
+    fn n_chunks(&self, n_evals: usize) -> usize {
+        self.config.n_threads.div_ceil(n_evals).max(1)
+    }
+
+    /// Number of work units of [`Fitter::build_counts`] for `n_evals` evaluations.
+    fn n_units(&self, n_evals: usize) -> u64 {
+        (n_evals * self.n_chunks(n_evals)) as u64
     }
 
     fn update_chi2(&self, grid: &mut [GridPoint], evals: &[Evaluation], counts: &[Vec<f64>]) {
@@ -613,8 +690,9 @@ impl Fitter {
     }
 }
 
-/// Default number of Glauber events: 10 times the data integral in the fit range.
-fn default_n_events(data: &TH1, config: &FitConfig) -> Result<usize> {
+/// Number of Glauber events used to build the model multiplicity: 10 times the
+/// data integral in the fit range.
+fn required_n_events(data: &TH1, config: &FitConfig) -> Result<usize> {
     let last = config
         .fit_max_bin
         .min(data.contents.len().saturating_sub(1));

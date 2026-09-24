@@ -7,27 +7,27 @@
     // bin/fit: MC-Glauber multiplicity fit, port of config.c
     fit: (
         // Input file from MC-Glauber
-        glauber_file: "~/glaub_auau_3gev_6M.root",
-        glauber_tree: "nt_Au3_Au3",
+        glauber_file: "/run/media/peter/msd1tb/Soft/oxy-glauber/TGlauberMC_Au_Au_snn30.0_md0.4_om0.0_rc1_smax99.root",
+        glauber_tree: "glauber",
 
         // Input file with data multiplicity
-        data_file: "~/star_mult_3gev_hist_500k.root",
-        data_hist: "hRefMult",
+        data_file: "/run/media/peter/msd1tb/Soft/CentralityFramework/Framework/McGlauber/centrality-master/input/test_input.root",
+        data_hist: "hMreco",
 
         // Output directory
-        out_dir: ".",
+        out_dir: "./test-check/",
 
         // Number of iterations to find the optimal mu parameter
-        n_iter: 20,
+        n_iter: 10,
 
         // Parameters for the multiplicity fit
-        f: (min: 0.1, max: 0.1, step: 0.01),
-        k: (min: 0.5, max: 1.0, step: 0.01),
-        p: (min: 0.001, max: 0.05, step: 0.001),
+        f: (min: 0.1, max: 1.0, step: 0.1),
+        k: (min: 1.0, max: 10.0, step: 1.0),
+        p: (min: 0.0, max: 0.0, step: 0.001),
 
         // Fit range (bins of the data histogram)
-        mult_min: 10,
-        mult_max: 110,
+        mult_min: 20,
+        mult_max: 480,
 
         // Bin size of the Npart/Ncoll histograms
         bin_size: 1.0,
@@ -42,17 +42,14 @@
         //  | NcollFast |    Ncoll^f / 100^f      |
         //  |   STAR    | (1-f)*Npart/2 + f*Ncoll |
         //  |   HADES   | (1 - f*Npart^2)*Npart   |
-        mode: "STAR",
+        mode: "Default",
 
         // Number of threads; omit to use all available cores
         // n_threads: 8,
 
-        // Number of Glauber events; omit to use 10 x data integral in the fit range
-        // n_events: 5000000,
-
         // Name of the per-ancestor multiplicity histogram: Gamma ("gamma") or Nbd ("nbd").
         // The sampling is always Gamma, as in the original UseGamma()/UseNbd().
-        distribution: Gamma,
+        distribution: Nbd,
 
         // Random seed for reproducible results; omit for a random seed
         // seed: 42,

@@ -62,8 +62,8 @@ The `fit` section is a port of the original `config.c`:
 ```ron
 (
     fit: (
-        glauber_file: "~/input_glauber_file.root",    // MC-Glauber input
-        glauber_tree: "nt_Au3_Au3",                   // name of the MC-Glauber tree
+        glauber_file: "~/input_glauber_file.root",    // MC-Glauber input (with TTree)
+        glauber_tree: "glauber",                      // name of the MC-Glauber tree
         data_file: "~/input_data_file.root",          // data input
         data_hist: "hRefMult",                        // name of the data histogram
         out_dir: ".",                                 // output directory
@@ -76,7 +76,6 @@ The `fit` section is a port of the original `config.c`:
         bin_size: 1.0,                                // bin width of the Npart/Ncoll histograms
         mode: "STAR",                                 // Number of ancestors parametrization
         // n_threads: 8,                              // default: all cores
-        // n_events: 5000000,                         // default: 10 × data integral in the fit range
         distribution: Gamma,                          // Gamma or Nbd; only sets the output histogram name
         // seed: 42,                                  // fixed seed for reproducible results
     ),
@@ -94,6 +93,9 @@ The `fit` section is a port of the original `config.c`:
 The Glauber tree must have the branches `B`, `Npart` and `Ncoll`. The branches
 `Ecc1..5` and `Psi1..5` are optional; if they are present, the matching
 `*_VS_Multiplicity` histograms are also written.
+
+The model uses the first 10 × (data integral in the fit range) Glauber events.
+If the tree has fewer events, the fit stops with an error.
 
 ### Output
 

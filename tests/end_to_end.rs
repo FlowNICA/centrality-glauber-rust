@@ -16,10 +16,11 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Toy Glauber tree and a data histogram generated with known parameters.
-fn write_inputs(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+/// Toy Glauber tree with 600k events and a data histogram with `n_data`
+/// entries generated with known parameters.
+fn write_inputs(dir: &std::path::Path, n_data: usize) -> (PathBuf, PathBuf) {
     let mut rng = SmallRng::seed_from_u64(1);
-    let n = 200_000;
+    let n = 600_000;
     let mut b = Vec::with_capacity(n);
     let mut npart = Vec::with_capacity(n);
     let mut ncoll = Vec::with_capacity(n);
@@ -49,7 +50,7 @@ fn write_inputs(dir: &std::path::Path) -> (PathBuf, PathBuf) {
     let theta = (TRUE_K + TRUE_MU) / TRUE_K;
     let mut data = Hist::reg(1000, 0., 1000.).name("hMult").float();
     let mut rng = SmallRng::seed_from_u64(2);
-    for i in 0..50_000 {
+    for i in 0..n_data {
         let j = (i * 7919) % n;
         let na = Mode::Default.n_ancestors(TRUE_F as f64, npart[j] as f64, ncoll[j] as f64) as i64;
         if na > 0 {
@@ -68,7 +69,7 @@ fn write_inputs(dir: &std::path::Path) -> (PathBuf, PathBuf) {
 #[test]
 fn fit_recovers_generated_parameters() {
     let dir = temp_dir("e2e");
-    let (glauber, data) = write_inputs(&dir);
+    let (glauber, data) = write_inputs(&dir, 50_000);
     let out_dir = dir.join("out");
 
     let config = FitConfig::builder()
@@ -81,7 +82,6 @@ fn fit_recovers_generated_parameters() {
         .p_range(0., 0., 0.)
         .fit_range(20, 300)
         .n_iter(15)
-        .n_events(150_000)
         .seed(42)
         .build()
         .unwrap();
@@ -140,7 +140,7 @@ fn fit_recovers_generated_parameters() {
 #[test]
 fn same_seed_gives_same_result() {
     let dir = temp_dir("seed");
-    let (glauber, data) = write_inputs(&dir);
+    let (glauber, data) = write_inputs(&dir, 50_000);
     let config = |threads| {
         FitConfig::builder()
             .glauber(&glauber, "nt_toy")
@@ -152,7 +152,6 @@ fn same_seed_gives_same_result() {
             .p_range(0., 0.02, 0.01)
             .fit_range(20, 300)
             .n_iter(5)
-            .n_events(50_000)
             .n_threads(threads)
             .seed(7)
             .build()
@@ -167,5 +166,28 @@ fn same_seed_gives_same_result() {
         .fit()
         .unwrap();
     assert_eq!(a, b);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn too_few_glauber_events_is_an_error() {
+    let dir = temp_dir("few");
+    /* ~half of the entries are in the fit range: ~1M Glauber events needed, the tree has 600k */
+    let (glauber, data) = write_inputs(&dir, 200_000);
+    let config = FitConfig::builder()
+        .glauber(&glauber, "nt_toy")
+        .data(&data, "hMult")
+        .out_dir(dir.join("out"))
+        .mode(Mode::Default)
+        .fit_range(20, 300)
+        .build()
+        .unwrap();
+    let err = centrality_rust::Fitter::new(config)
+        .err()
+        .expect("fit must fail");
+    assert!(
+        err.to_string().contains("not enough Glauber events"),
+        "{err}"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
