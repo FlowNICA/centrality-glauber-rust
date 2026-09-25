@@ -67,15 +67,15 @@ impl ScanRange {
     }
 }
 
-/// Which distribution is reported as the per-ancestor multiplicity histogram.
-///
-/// As in the original framework the sampling always uses a Gamma distribution
-/// with mean `mu` and NBD-like parameter `k`; this only names the output
-/// histogram (`gamma` or `nbd`).
+/// Distribution of the multiplicity produced by one ancestor, with mean `mu`
+/// and variance `mu (1 + mu / k)`. It is used both in the fit and for the
+/// per-ancestor output histogram (`gamma` or `nbd`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 pub enum Distribution {
+    /// Continuous Gamma distribution, as in the original framework's fit.
     #[default]
     Gamma,
+    /// Negative binomial distribution (integer multiplicities).
     Nbd,
 }
 

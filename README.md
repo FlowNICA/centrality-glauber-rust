@@ -14,9 +14,14 @@ a pure-Rust implementation of the ROOT format, so no ROOT installation is needed
 ## Model
 
 Each Glauber event has a number of ancestors (independent particle sources),
-`Na(f; Npart, Ncoll)`. Each ancestor produces a Gamma-distributed number of
-particles with mean `mu` and NBD-like width parameter `k`. With probability `p`
-a second (pile-up) event is added. The functional form of `Na` is chosen by `mode`:
+`Na(f; Npart, Ncoll)`. Each ancestor produces a random number of particles
+with mean `mu` and variance `mu·(1 + mu/k)`. With `distribution: Gamma` (the
+default) that number follows a Gamma distribution. With `distribution: Nbd` it
+follows a negative binomial distribution, so multiplicities are integers.
+Either way, the total for `Na` ancestors is drawn in a single step: the sum of
+`Na` NBD(mu, k) draws is exactly NBD(Na·mu, Na·k), and similarly for Gamma.
+With probability `p` a second (pile-up) event is added. The functional form of
+`Na` is chosen by `mode`:
 
 | mode        | Na                         |
 |-------------|----------------------------|
@@ -92,7 +97,7 @@ The `fit` section is a port of the original `config.c`:
         bin_size: 1.0,                                // bin width of the Npart/Ncoll histograms
         mode: "STAR",                                 // Number of ancestors parametrization
         // n_threads: 8,                              // default: all cores
-        distribution: Gamma,                          // Gamma or Nbd; only sets the output histogram name
+        distribution: Gamma,                          // per-ancestor multiplicity: Gamma or Nbd
         // seed: 42,                                  // fixed seed for reproducible results
     ),
 )
@@ -172,11 +177,17 @@ executable, read it with `config_file::read_section::<YourConfig>(path, "name")`
   the bin width was not `bin_size` unless it divided the maximum evenly, and
   the events at the maximum ended up in the overflow bin. `bin_size` only
   affects these two QA histograms; the fit does not depend on it.
+- `distribution: Nbd` samples NBD multiplicities in the fit and in the `nbd`
+  histogram. In the C++ version, `UseNbd()` never changes the fit, which always
+  samples Gamma. On `master`, it only switches the per-ancestor histogram
+  (`SetNBDhist`) to NBD, and on `parallel-params-fitter` it only renames that
+  histogram. Also, the C++ histogram's `std::negative_binomial_distribution`
+  truncates `k` to an integer, so `k < 1` gives a degenerate distribution. This
+  port uses the real value of `k`. With `distribution: Gamma` (the default),
+  the results are the same as before.
 - These C++ behaviors are kept on purpose:
   - The model is normalized over bins `mult_min+1..=mult_max`, while χ² uses
     bins `mult_min..=mult_max`.
-  - `UseNbd` (`distribution: Nbd`) only renames the output histogram; the
-    sampling is always Gamma.
   - The upper limit of the `mu` search comes from the last filled data bin. If
     the data histogram's range cuts off the multiplicity tail, the true `mu` can
     lie outside the search range.

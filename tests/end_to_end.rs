@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
+use centrality_glauber_rust::Distribution as MultDistribution;
 use centrality_glauber_rust::{FitConfig, FitMethod, Mode};
 use oxiroot::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
-use rand_distr::{Distribution, Gamma};
+use rand_distr::{Distribution, Gamma, Poisson};
 
 const TRUE_F: f32 = 0.5;
 const TRUE_MU: f64 = 0.8;
@@ -20,8 +21,9 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 /// Toy Glauber tree with 600k events and a data histogram with `n_data`
-/// entries generated with known parameters.
-fn write_inputs(dir: &std::path::Path, n_data: usize) -> (PathBuf, PathBuf) {
+/// entries generated with known parameters, with Gamma or (`nbd`) NBD
+/// distributed multiplicity per ancestor.
+fn write_inputs(dir: &std::path::Path, n_data: usize, nbd: bool) -> (PathBuf, PathBuf) {
     let mut rng = SmallRng::seed_from_u64(1);
     let n = 600_000;
     let mut b = Vec::with_capacity(n);
@@ -56,7 +58,14 @@ fn write_inputs(dir: &std::path::Path, n_data: usize) -> (PathBuf, PathBuf) {
     for i in 0..n_data {
         let j = (i * 7919) % n;
         let na = Mode::Default.n_ancestors(TRUE_F as f64, npart[j] as f64, ncoll[j] as f64) as i64;
-        if na > 0 {
+        if na > 0 && nbd {
+            /* each ancestor separately: NBD(mu, k) as a Gamma-Poisson mixture */
+            let gamma = Gamma::new(TRUE_K, TRUE_MU / TRUE_K).unwrap();
+            let n_hits: f64 = (0..na)
+                .map(|_| Poisson::new(gamma.sample(&mut rng)).map_or(0., |d| d.sample(&mut rng)))
+                .sum();
+            data.fill(n_hits);
+        } else if na > 0 {
             data.fill(
                 Gamma::new(na as f64 * alpha, theta)
                     .unwrap()
@@ -72,7 +81,7 @@ fn write_inputs(dir: &std::path::Path, n_data: usize) -> (PathBuf, PathBuf) {
 #[test]
 fn fit_recovers_generated_parameters() {
     let dir = temp_dir("e2e");
-    let (glauber, data) = write_inputs(&dir, 50_000);
+    let (glauber, data) = write_inputs(&dir, 50_000, false);
     let out_dir = dir.join("out");
 
     let config = FitConfig::builder()
@@ -143,7 +152,7 @@ fn fit_recovers_generated_parameters() {
 #[test]
 fn likelihood_fit_recovers_generated_parameters() {
     let dir = temp_dir("likelihood");
-    let (glauber, data) = write_inputs(&dir, 50_000);
+    let (glauber, data) = write_inputs(&dir, 50_000, false);
 
     let config = FitConfig::builder()
         .glauber(&glauber, "nt_toy")
@@ -184,9 +193,164 @@ fn likelihood_fit_recovers_generated_parameters() {
 }
 
 #[test]
+fn nbd_fit_uses_nbd_multiplicities() {
+    let dir = temp_dir("nbd");
+    let (glauber, data) = write_inputs(&dir, 50_000, true);
+    let out_dir = dir.join("out");
+
+    let config = FitConfig::builder()
+        .glauber(&glauber, "nt_toy")
+        .data(&data, "hMult")
+        .out_dir(&out_dir)
+        .mode(Mode::Default)
+        .distribution(MultDistribution::Nbd)
+        .f_range(TRUE_F, TRUE_F, 0.)
+        .k_range(1.0, 2.0, 0.25)
+        .p_range(0., 0., 0.)
+        .fit_range(20, 300)
+        .n_iter(15)
+        .seed(42)
+        .build()
+        .unwrap();
+
+    let result = centrality_glauber_rust::run(config).unwrap();
+    println!("{:?} chi2/ndf = {}", result.best, result.chi2);
+    /*
+     * Loose: the golden section search on the noisy simulated chi2 pulls mu
+     * low by a few 0.01 for Gamma and NBD alike, and k is barely constrained
+     * by this toy; the NBD sampling itself is checked below and in the
+     * fitter unit tests
+     */
+    assert!(
+        (result.best.mu as f64 - TRUE_MU).abs() < 0.1,
+        "mu = {}",
+        result.best.mu
+    );
+    assert!(result.chi2 < 1.5, "chi2/ndf = {}", result.chi2);
+
+    /*
+     * The per-ancestor histogram is NBD(mu, k): integer values, so bin
+     * [0, 1) holds exactly P(0) = (k / (k + mu))^k (a Gamma sample would put
+     * ~0.66 there instead of ~0.53), and the mean is mu
+     */
+    let qa = FileReader::open(out_dir.join(centrality_glauber_rust::output::QA_FILE_NAME)).unwrap();
+    let nbd = TH1::read_root(&qa, "nbd").unwrap();
+    let total: f64 = nbd.contents.iter().sum();
+    let (mu, k) = (result.best.mu as f64, result.best.k as f64);
+    let p0 = (k / (k + mu)).powf(k);
+    assert!(
+        (nbd.contents[1] / total - p0).abs() < 0.01,
+        "P(0) = {}, expected {p0}",
+        nbd.contents[1] / total
+    );
+    let mean = (1..=nbd.xaxis.nbins as usize)
+        .map(|b| (b - 1) as f64 * nbd.contents[b])
+        .sum::<f64>()
+        / total;
+    assert!((mean - mu).abs() < 0.02, "mean {mean}, mu {mu}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Mean and standard deviation of a multiplicity histogram with unit bins,
+/// taking the lower bin edge (the integer value for NBD) for each bin.
+fn mean_std(h: &TH1) -> (f64, f64) {
+    let (mut s0, mut s1, mut s2) = (0., 0., 0.);
+    for b in 1..=h.xaxis.nbins as usize {
+        let (x, c) = ((b - 1) as f64, h.contents[b]);
+        s0 += c;
+        s1 += c * x;
+        s2 += c * x * x;
+    }
+    let mean = s1 / s0;
+    (mean, (s2 / s0 - mean * mean).sqrt())
+}
+
+/// Sanity check: the per-ancestor Gamma has the same mean and variance as
+/// NBD(mu, k), and a sum of many ancestors is nearly the same for both, so
+/// they must give nearly the same model and fit. The only systematic
+/// difference is the discreteness: NBD values are integers at the lower edge
+/// of the unit bins, Gamma values are spread over the bins (+0.5 on average).
+#[test]
+fn gamma_and_nbd_agree_for_integer_k() {
+    let dir = temp_dir("gamma-nbd");
+    let (glauber, data) = write_inputs(&dir, 50_000, false);
+    let config = |distribution, k: f32, seed| {
+        FitConfig::builder()
+            .glauber(&glauber, "nt_toy")
+            .data(&data, "hMult")
+            .mode(Mode::Default)
+            .distribution(distribution)
+            .f_range(TRUE_F, TRUE_F, 0.)
+            .k_range(k, k, 0.)
+            .p_range(0., 0., 0.)
+            .fit_range(20, 300)
+            .n_iter(20)
+            .seed(seed)
+            .build()
+            .unwrap()
+    };
+
+    for k in [1., 2., 5.] {
+        /* model: same width, NBD higher by the discreteness shift of ~0.5 */
+        let params = centrality_glauber_rust::FitParams {
+            f: TRUE_F,
+            mu: TRUE_MU as f32,
+            k,
+            p: 0.,
+        };
+        let model = |distribution| {
+            let fitter = centrality_glauber_rust::Fitter::new(config(distribution, k, 1)).unwrap();
+            mean_std(&fitter.model_histograms(&params).fit)
+        };
+        let (gamma, nbd) = (model(MultDistribution::Gamma), model(MultDistribution::Nbd));
+        println!("k = {k}: model (mean, std) Gamma {gamma:?}, NBD {nbd:?}");
+        assert!(
+            (nbd.0 - gamma.0 - 0.5).abs() < 0.1,
+            "k = {k}: mean NBD - Gamma = {}",
+            nbd.0 - gamma.0
+        );
+        assert!(
+            (nbd.1 / gamma.1 - 1.).abs() < 0.01,
+            "k = {k}: std NBD / Gamma = {}",
+            nbd.1 / gamma.1
+        );
+
+        /*
+         * Fit with k fixed: a single fit scatters by ~0.02 in mu (simulation
+         * noise in the golden section search), so compare averages over seeds
+         * (uncertainty of the difference ~0.008)
+         */
+        let n_seeds = 12;
+        let mean_mu = |distribution| {
+            (0..n_seeds)
+                .map(|seed| {
+                    centrality_glauber_rust::Fitter::new(config(distribution, k, 7 * seed + 3))
+                        .unwrap()
+                        .fit_with_progress(&|_| {})
+                        .unwrap()
+                        .best
+                        .mu as f64
+                })
+                .sum::<f64>()
+                / n_seeds as f64
+        };
+        let (gamma_mu, nbd_mu) = (
+            mean_mu(MultDistribution::Gamma),
+            mean_mu(MultDistribution::Nbd),
+        );
+        println!("k = {k}: mean fitted mu Gamma {gamma_mu:.4}, NBD {nbd_mu:.4}");
+        assert!(
+            (nbd_mu - gamma_mu).abs() < 0.03,
+            "k = {k}: mu Gamma {gamma_mu}, NBD {nbd_mu}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn bin_size_does_not_change_the_fit() {
     let dir = temp_dir("bin-size");
-    let (glauber, data) = write_inputs(&dir, 50_000);
+    let (glauber, data) = write_inputs(&dir, 50_000, false);
     let fit = |bin_size| {
         let config = FitConfig::builder()
             .glauber(&glauber, "nt_toy")
@@ -219,7 +383,7 @@ fn bin_size_does_not_change_the_fit() {
 #[test]
 fn same_seed_gives_same_result() {
     let dir = temp_dir("seed");
-    let (glauber, data) = write_inputs(&dir, 50_000);
+    let (glauber, data) = write_inputs(&dir, 50_000, false);
     let config = |threads| {
         FitConfig::builder()
             .glauber(&glauber, "nt_toy")
@@ -252,7 +416,7 @@ fn same_seed_gives_same_result() {
 fn too_few_glauber_events_is_an_error() {
     let dir = temp_dir("few");
     /* ~half of the entries are in the fit range: ~1M Glauber events needed, the tree has 600k */
-    let (glauber, data) = write_inputs(&dir, 200_000);
+    let (glauber, data) = write_inputs(&dir, 200_000, false);
     let config = FitConfig::builder()
         .glauber(&glauber, "nt_toy")
         .data(&data, "hMult")

@@ -52,8 +52,10 @@
         // Number of threads; omit to use all available cores
         // n_threads: 8,
 
-        // Name of the per-ancestor multiplicity histogram: Gamma ("gamma") or Nbd ("nbd").
-        // The sampling is always Gamma, as in the original UseGamma()/UseNbd().
+        // Distribution of the multiplicity per ancestor (mean mu, variance mu*(1 + mu/k)),
+        // used in the fit and for the per-ancestor output histogram:
+        //   Gamma - continuous Gamma distribution ("gamma" histogram)
+        //   Nbd   - negative binomial distribution, integer values ("nbd" histogram)
         distribution: Nbd,
 
         // Random seed for reproducible results; omit for a random seed

@@ -4,10 +4,10 @@ use std::time::{Duration, Instant};
 use oxiroot::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
-use rand_distr::{Distribution as _, Gamma};
+use rand_distr::{Distribution as _, Gamma, Poisson};
 use rayon::prelude::*;
 
-use crate::config::{FitConfig, FitMethod};
+use crate::config::{Distribution, FitConfig, FitMethod};
 use crate::error::{Error, Result};
 use crate::glauber::GlauberEvents;
 use crate::mode::Mode;
@@ -139,8 +139,8 @@ pub struct ModelHistograms {
 }
 
 /// Fits the data multiplicity with the MC-Glauber based model: the number of
-/// ancestors (from `Npart`, `Ncoll`) times Gamma distributed multiplicities per
-/// ancestor, with optional pile-up.
+/// ancestors (from `Npart`, `Ncoll`) times Gamma or NBD distributed
+/// multiplicities per ancestor, with optional pile-up.
 pub struct Fitter {
     config: FitConfig,
     data: TH1,
@@ -424,6 +424,7 @@ impl Fitter {
         let n_workers = self.config.n_threads;
         let sampler = Sampler::new(
             self.config.mode,
+            self.config.distribution,
             params.f,
             params.mu as f64,
             params.k as f64,
@@ -525,7 +526,8 @@ impl Fitter {
         }
     }
 
-    /// Distribution of the multiplicity from a single ancestor.
+    /// Distribution of the multiplicity from a single ancestor (Gamma or NBD,
+    /// as used in the fit).
     pub fn nbd_histogram(&self, params: &FitParams) -> TH1 {
         let nbins = ((params.mu as f64 + 1.) * 3.).max(10.) as i32;
         let mut h = Hist::reg(nbins, 0., nbins as f64)
@@ -533,13 +535,14 @@ impl Fitter {
             .float();
         let sampler = Sampler::new(
             self.config.mode,
+            self.config.distribution,
             params.f,
             params.mu as f64,
             params.k as f64,
         );
         let mut rng = self.rng(u64::MAX - 1, 0, 0);
         for _ in 0..NBD_SAMPLES {
-            h.fill(sampler.sum_of_gammas(1, &mut rng));
+            h.fill(sampler.sum_over_ancestors(1, &mut rng));
         }
         h
     }
@@ -602,7 +605,13 @@ impl Fitter {
                     let main = c * n_main / n_chunks..(c + 1) * n_main / n_chunks;
                     let pool = n_main + c * n_plp / n_chunks..n_main + (c + 1) * n_plp / n_chunks;
 
-                    let sampler = Sampler::new(self.config.mode, gp.f, eval.mu, gp.k as f64);
+                    let sampler = Sampler::new(
+                        self.config.mode,
+                        self.config.distribution,
+                        gp.f,
+                        eval.mu,
+                        gp.k as f64,
+                    );
                     let mut rng = self.rng(stream, e, c);
                     let mut counts = vec![0.; self.axis.n_cells()];
                     self.simulate(&sampler, gp.p, main, pool, &mut rng, |_, n_hits, _| {
@@ -842,20 +851,28 @@ impl ModelAxis {
     }
 }
 
-/// Gamma distributed multiplicity per ancestor, with mean `mu` and NBD-like `k`.
+/// Multiplicity per ancestor with mean `mu` and variance `mu (1 + mu / k)`:
+/// Gamma distributed, or NBD distributed (integer) with [`Distribution::Nbd`].
 #[derive(Debug, Clone, Copy)]
 struct Sampler {
     mode: Mode,
     f: f64,
+    distribution: Distribution,
+    mu: f64,
+    k: f64,
+    /// Gamma shape and scale per ancestor.
     alpha: f64,
     theta: f64,
 }
 
 impl Sampler {
-    fn new(mode: Mode, f: f32, mu: f64, k: f64) -> Self {
+    fn new(mode: Mode, distribution: Distribution, f: f32, mu: f64, k: f64) -> Self {
         Self {
             mode,
             f: f as f64,
+            distribution,
+            mu,
+            k,
             alpha: mu * k / (mu + k),
             theta: (k + mu) / k,
         }
@@ -863,15 +880,36 @@ impl Sampler {
 
     fn n_hits(&self, npart: f32, ncoll: f32, rng: &mut SmallRng) -> f64 {
         let na = self.mode.n_ancestors(self.f, npart as f64, ncoll as f64);
-        self.sum_of_gammas(na as i64, rng)
+        self.sum_over_ancestors(na as i64, rng)
     }
 
-    /// The sum of `n` i.i.d. Gamma(alpha, theta) draws is one Gamma(n*alpha, theta) draw.
-    fn sum_of_gammas(&self, n: i64, rng: &mut SmallRng) -> f64 {
-        if n <= 0 || !(self.alpha > 0.) || !(self.theta > 0.) {
+    /// Total multiplicity of `n` independent ancestors, drawn at once:
+    /// - Gamma: the sum of `n` Gamma(alpha, theta) is Gamma(n alpha, theta);
+    /// - NBD: the sum of `n` NBD(mu, k) is NBD(n mu, n k), drawn as a Poisson
+    ///   with a Gamma(n k, mu / k) distributed mean (valid for non-integer k).
+    fn sum_over_ancestors(&self, n: i64, rng: &mut SmallRng) -> f64 {
+        if n <= 0 {
             return 0.;
         }
-        Gamma::new(n as f64 * self.alpha, self.theta).map_or(0., |g| g.sample(rng))
+        match self.distribution {
+            Distribution::Gamma => {
+                if !(self.alpha > 0.) || !(self.theta > 0.) {
+                    return 0.;
+                }
+                Gamma::new(n as f64 * self.alpha, self.theta).map_or(0., |g| g.sample(rng))
+            }
+            Distribution::Nbd => {
+                if !(self.mu > 0.) || !(self.k > 0.) {
+                    return 0.;
+                }
+                let lambda =
+                    Gamma::new(n as f64 * self.k, self.mu / self.k).map_or(0., |g| g.sample(rng));
+                if !(lambda > 0.) {
+                    return 0.;
+                }
+                Poisson::new(lambda).map_or(0., |d| d.sample(rng))
+            }
+        }
     }
 }
 
@@ -970,6 +1008,57 @@ mod tests {
             }
             assert_eq!(h.contents, expected, "width {width}");
         }
+    }
+
+    /// Mean and variance of `n` draws of `sum_over_ancestors(na)`.
+    fn moments(distribution: Distribution, mu: f64, k: f64, na: i64) -> (f64, f64, bool) {
+        let sampler = Sampler::new(Mode::Default, distribution, 0.5, mu, k);
+        let mut rng = SmallRng::seed_from_u64(11);
+        let n = 400_000;
+        let x: Vec<f64> = (0..n)
+            .map(|_| sampler.sum_over_ancestors(na, &mut rng))
+            .collect();
+        let mean = x.iter().sum::<f64>() / n as f64;
+        let var = x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+        (mean, var, x.iter().all(|v| v.fract() == 0.))
+    }
+
+    #[test]
+    fn nbd_sampler_matches_nbd_moments() {
+        /* sum of na NBD(mu, k): mean na mu, variance na mu (1 + mu / k); also non-integer k */
+        for (mu, k, na) in [(0.8, 1.5, 1), (0.8, 1.5, 40), (3., 0.5, 7), (20., 100., 3)] {
+            let (mean, var, integer) = moments(Distribution::Nbd, mu, k, na);
+            let (exp_mean, exp_var) = (na as f64 * mu, na as f64 * mu * (1. + mu / k));
+            assert!(integer, "NBD draws must be integers");
+            assert!(
+                (mean / exp_mean - 1.).abs() < 0.01,
+                "{mu} {k} {na}: mean {mean}"
+            );
+            assert!(
+                (var / exp_var - 1.).abs() < 0.03,
+                "{mu} {k} {na}: var {var}"
+            );
+        }
+        /* P(0) of a single ancestor: (k / (k + mu))^k */
+        let sampler = Sampler::new(Mode::Default, Distribution::Nbd, 0.5, 0.8, 1.5);
+        let mut rng = SmallRng::seed_from_u64(5);
+        let zeros = (0..400_000)
+            .filter(|_| sampler.sum_over_ancestors(1, &mut rng) == 0.)
+            .count() as f64
+            / 400_000.;
+        let p0 = (1.5f64 / 2.3).powf(1.5);
+        assert!((zeros - p0).abs() < 0.003, "P(0) = {zeros}, expected {p0}");
+    }
+
+    #[test]
+    fn gamma_sampler_matches_gamma_moments() {
+        let (mean, var, integer) = moments(Distribution::Gamma, 0.8, 1.5, 40);
+        assert!(!integer);
+        assert!((mean / 32. - 1.).abs() < 0.01, "mean {mean}");
+        assert!(
+            (var / (32. * (1. + 0.8 / 1.5)) - 1.).abs() < 0.03,
+            "var {var}"
+        );
     }
 
     #[test]
