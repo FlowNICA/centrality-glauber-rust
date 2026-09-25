@@ -166,6 +166,12 @@ executable, read it with `config_file::read_section::<YourConfig>(path, "name")`
 - Nothing is drawn: there is no `glauber.pdf` or canvas. `glauber_qa.root` is
   written to `out_dir` instead of the current directory.
 - `GetModelHisto` is not ported.
+- `fNpartHisto` and `fNcollHisto` have bins exactly `bin_size` wide from 0,
+  and there are enough bins to include the maximum. In the C++ version, the
+  range `[0, int(max))` was split into `int(max / bin_size)` bins. As a result,
+  the bin width was not `bin_size` unless it divided the maximum evenly, and
+  the events at the maximum ended up in the overflow bin. `bin_size` only
+  affects these two QA histograms; the fit does not depend on it.
 - These C++ behaviors are kept on purpose:
   - The model is normalized over bins `mult_min+1..=mult_max`, while χ² uses
     bins `mult_min..=mult_max`.

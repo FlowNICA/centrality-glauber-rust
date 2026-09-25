@@ -184,6 +184,39 @@ fn likelihood_fit_recovers_generated_parameters() {
 }
 
 #[test]
+fn bin_size_does_not_change_the_fit() {
+    let dir = temp_dir("bin-size");
+    let (glauber, data) = write_inputs(&dir, 50_000);
+    let fit = |bin_size| {
+        let config = FitConfig::builder()
+            .glauber(&glauber, "nt_toy")
+            .data(&data, "hMult")
+            .mode(Mode::Default)
+            .f_range(TRUE_F, TRUE_F, 0.)
+            .k_range(1.0, 2.0, 0.5)
+            .p_range(0., 0.02, 0.01)
+            .fit_range(20, 300)
+            .n_iter(5)
+            .n_threads(4)
+            .bin_size(bin_size)
+            .seed(3)
+            .build()
+            .unwrap();
+        let fitter = centrality_glauber_rust::Fitter::new(config).unwrap();
+        let h = fitter.npart_histo();
+        let nbins = h.xaxis.nbins as usize;
+        assert!(((h.xaxis.xmax / nbins as f64) - bin_size).abs() < 1e-9);
+        assert_eq!(h.contents[nbins + 1], 0., "Npart maximum in the overflow");
+        fitter.fit().unwrap()
+    };
+    let reference = fit(1.);
+    for bin_size in [0.1, 0.3, 2., 3., 7.] {
+        assert_eq!(fit(bin_size), reference, "bin_size {bin_size}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn same_seed_gives_same_result() {
     let dir = temp_dir("seed");
     let (glauber, data) = write_inputs(&dir, 50_000);

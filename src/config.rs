@@ -137,8 +137,9 @@ pub struct FitConfig {
     pub fit_max_bin: usize,
     /// Minimum chi2 or maximum likelihood.
     pub fit_method: FitMethod,
-    /// Bin width of the `Npart` and `Ncoll` histograms.
-    pub bin_size: f32,
+    /// Bin width of the `Npart` and `Ncoll` histograms (f64 so that e.g. 0.1
+    /// gives bin edges at integers). Does not affect the fit.
+    pub bin_size: f64,
     /// Functional form of the number of ancestors.
     pub mode: Mode,
     /// Number of worker threads.
@@ -188,7 +189,7 @@ pub struct FitConfigBuilder {
     #[serde(rename = "mult_max")]
     fit_max_bin: usize,
     fit_method: FitMethod,
-    bin_size: f32,
+    bin_size: f64,
     mode: Mode,
     n_threads: Option<usize>,
     distribution: Distribution,
@@ -301,7 +302,7 @@ impl FitConfigBuilder {
         self
     }
 
-    pub fn bin_size(mut self, bin_size: f32) -> Self {
+    pub fn bin_size(mut self, bin_size: f64) -> Self {
         self.bin_size = bin_size;
         self
     }
@@ -359,7 +360,7 @@ impl FitConfigBuilder {
                 self.fit_min_bin, self.fit_max_bin
             )));
         }
-        if !(self.bin_size > 0.) {
+        if !(self.bin_size > 0. && self.bin_size.is_finite()) {
             return Err(Error::Config(format!(
                 "bin size must be positive, got {}",
                 self.bin_size

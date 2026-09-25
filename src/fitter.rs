@@ -19,6 +19,8 @@ const NBD_SAMPLES: usize = 100_000;
 /// Simulated count used for an empty model bin in the likelihood, so that an
 /// empty model bin with data gives a large but finite penalty instead of `ln 0`.
 const MIN_MODEL_COUNT: f64 = 0.1;
+/// Maximum number of bins of the `Npart` and `Ncoll` histograms.
+const MAX_RANGE_BINS: usize = 10_000_000;
 /// Parameters of the multiplicity model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FitParams {
@@ -211,17 +213,17 @@ impl Fitter {
         let npart_histo = range_histo(
             "fNpartHisto",
             "Npart",
-            events.npart_max.trunc(),
+            events.npart_max,
             config.bin_size,
             &events.npart[..n_events],
-        );
+        )?;
         let ncoll_histo = range_histo(
             "fNcollHisto",
             "Ncoll",
-            events.ncoll_max.trunc(),
+            events.ncoll_max,
             config.bin_size,
             &events.ncoll[..n_events],
-        );
+        )?;
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(config.n_threads)
@@ -282,8 +284,9 @@ impl Fitter {
     /// Same as [`Fitter::fit`], reporting the progress to `progress`.
     pub fn fit_with_progress(&self, progress: &(dyn Fn(FitProgress) + Sync)) -> Result<FitResult> {
         let mode = self.config.mode;
-        let npart_max = self.npart_histo.xaxis.xmax.trunc();
-        let ncoll_max = self.ncoll_histo.xaxis.xmax.trunc();
+        /* int(TTree::GetMaximum) as in the original; independent of bin_size */
+        let npart_max = self.events.npart_max.trunc() as f64;
+        let ncoll_max = self.events.ncoll_max.trunc() as f64;
 
         let mut grid = Vec::new();
         for &f in &self.config.f.points() {
@@ -767,19 +770,26 @@ fn required_n_events(data: &TH1, config: &FitConfig) -> Result<usize> {
     Ok(n)
 }
 
-/// Histogram over `[0, max]` with bins of the given width; a degenerate range
-/// still gives one bin of that width.
-fn range_histo(name: &str, title: &str, max: f32, width: f32, values: &[f32]) -> TH1 {
-    let max = if max > 0. { max } else { width };
-    let nbins = ((max / width) as i32).max(1);
-    let mut h = Hist::reg(nbins, 0., max as f64)
+/// Histogram with bins of exactly `width` starting at 0, with as many bins as
+/// needed to include `max` (the upper edge is exclusive, so a value equal to
+/// `max` must not fall into the overflow).
+fn range_histo(name: &str, title: &str, max: f32, width: f64, values: &[f32]) -> Result<TH1> {
+    /* the tolerance keeps e.g. max = 0.9, width = 0.3 at 3 full bins + 1 */
+    let n = (max.max(0.) as f64 / width + 1e-6).floor() + 1.;
+    if n > MAX_RANGE_BINS as f64 {
+        return Err(Error::Config(format!(
+            "bin_size {width} gives {n} bins for {title} up to {max}, maximum is {MAX_RANGE_BINS}"
+        )));
+    }
+    let nbins = n as usize;
+    let mut h = Hist::reg(nbins as i32, 0., nbins as f64 * width)
         .name(name)
         .title(title)
         .float();
     for &v in values {
         h.fill(v as f64);
     }
-    h
+    Ok(h)
 }
 
 fn splitmix64(mut x: u64) -> u64 {
@@ -927,4 +937,50 @@ struct SimEvent {
     n_hits: f64,
     /// Multiplicity of the pile-up partner, if pile-up happened.
     n_plp: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_histo_bins_have_exactly_bin_size() {
+        /* integer values 0..=394 as in a Glauber tree */
+        let values: Vec<f32> = (0..=394).map(|v| v as f32).collect();
+        for tenths in [1u32, 3, 5, 7, 10, 20, 30, 70, 10_000] {
+            let width = tenths as f64 / 10.;
+            let h = range_histo("h", "t", 394., width, &values).unwrap();
+            let nbins = h.xaxis.nbins as usize;
+            assert_eq!(h.xaxis.xmin, 0.);
+            assert!(
+                ((h.xaxis.xmax / nbins as f64) - width).abs() < 1e-9,
+                "width {width}: bin width {}",
+                h.xaxis.xmax / nbins as f64
+            );
+            /* no under/overflow: the maximum is in the last bin */
+            assert_eq!(
+                (h.contents[0], h.contents[nbins + 1]),
+                (0., 0.),
+                "width {width}"
+            );
+            /* every integer is in its exact bin floor(10 v / tenths) + 1 */
+            let mut expected = vec![0.; nbins + 2];
+            for v in 0..=394u32 {
+                expected[(10 * v / tenths) as usize + 1] += 1.;
+            }
+            assert_eq!(h.contents, expected, "width {width}");
+        }
+    }
+
+    #[test]
+    fn range_histo_edge_cases() {
+        /* max on a bin edge despite rounding (33 / 1.1 = 29.999999999999996) */
+        let h = range_histo("h", "t", 33., 1.1, &[33.]).unwrap();
+        assert_eq!(h.xaxis.nbins, 31);
+        assert_eq!(h.contents[32], 0., "maximum in the overflow");
+        /* degenerate trees still give one bin of the requested width */
+        let h = range_histo("h", "t", 0., 2., &[0.]).unwrap();
+        assert_eq!((h.xaxis.nbins, h.xaxis.xmax), (1, 2.));
+        assert!(range_histo("h", "t", 400., 1e-6, &[]).is_err());
+    }
 }
