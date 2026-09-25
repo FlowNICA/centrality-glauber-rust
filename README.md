@@ -1,4 +1,4 @@
-# centrality-rust
+# centrality-glauber-rust
 
 A Rust port of the MC-Glauber multiplicity fitter from
 [CentralityFramework](https://github.com/FlowNICA/CentralityFramework/tree/parallel-params-fitter/Framework/McGlauber/centrality-master/glauber).
@@ -121,7 +121,7 @@ Both files are written to `out_dir`:
 The fitter can also be used from Rust, with the configuration built in code:
 
 ```rust
-use centrality_rust::{FitConfig, Mode};
+use centrality_glauber_rust::{FitConfig, Mode};
 
 let config = FitConfig::builder()
     .glauber("glauber.root", "nt_Au3_Au3")
@@ -131,7 +131,7 @@ let config = FitConfig::builder()
     .mode(Mode::Star)
     .seed(42)
     .build()?;
-let result = centrality_rust::run(config)?;   // fits and writes both output files
+let result = centrality_glauber_rust::run(config)?;   // fits and writes both output files
 println!("mu = {}, chi2/ndf = {}", result.best.mu, result.chi2);
 ```
 

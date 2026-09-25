@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use centrality_rust::{FitConfig, Mode};
+use centrality_glauber_rust::{FitConfig, Mode};
 use oxiroot::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -11,7 +11,10 @@ const TRUE_MU: f64 = 0.8;
 const TRUE_K: f64 = 1.5;
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("centrality-rust-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "centrality-glauber-rust-{name}-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -86,7 +89,7 @@ fn fit_recovers_generated_parameters() {
         .build()
         .unwrap();
 
-    let result = centrality_rust::run(config.clone()).unwrap();
+    let result = centrality_glauber_rust::run(config.clone()).unwrap();
     println!("{result:?}");
     assert_eq!(result.scan.len(), 5);
     assert!(
@@ -102,11 +105,11 @@ fn fit_recovers_generated_parameters() {
     assert!(result.chi2 < 3., "chi2/ndf = {}", result.chi2);
 
     /* outputs are readable */
-    let scan = FileReader::open(centrality_rust::output::scan_file_path(&config)).unwrap();
+    let scan = FileReader::open(centrality_glauber_rust::output::scan_file_path(&config)).unwrap();
     let tree = TreeReader::open(&scan, "test_tree").unwrap();
     assert_eq!(tree.num_entries(), 5);
 
-    let qa = FileReader::open(out_dir.join(centrality_rust::output::QA_FILE_NAME)).unwrap();
+    let qa = FileReader::open(out_dir.join(centrality_glauber_rust::output::QA_FILE_NAME)).unwrap();
     let fit = TH1::read_root(&qa, "glaub_fit_histo").unwrap();
     let data = TH1::read_root(&qa, "hMult").unwrap();
     let fit_int: f64 = fit.contents[21..=300].iter().sum();
@@ -157,11 +160,11 @@ fn same_seed_gives_same_result() {
             .build()
             .unwrap()
     };
-    let a = centrality_rust::Fitter::new(config(4))
+    let a = centrality_glauber_rust::Fitter::new(config(4))
         .unwrap()
         .fit()
         .unwrap();
-    let b = centrality_rust::Fitter::new(config(4))
+    let b = centrality_glauber_rust::Fitter::new(config(4))
         .unwrap()
         .fit()
         .unwrap();
@@ -182,7 +185,7 @@ fn too_few_glauber_events_is_an_error() {
         .fit_range(20, 300)
         .build()
         .unwrap();
-    let err = centrality_rust::Fitter::new(config)
+    let err = centrality_glauber_rust::Fitter::new(config)
         .err()
         .expect("fit must fail");
     assert!(

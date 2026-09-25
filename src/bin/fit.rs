@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use centrality_rust::{FitConfig, FitProgress};
+use centrality_glauber_rust::{FitConfig, FitProgress};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
@@ -47,7 +47,7 @@ fn main() -> ExitCode {
         FitProgress::Finish => bar.finish_and_clear(),
     };
     let result = FitConfig::from_ron_file(&args.config)
-        .and_then(|config| centrality_rust::run_with_progress(config, &progress));
+        .and_then(|config| centrality_glauber_rust::run_with_progress(config, &progress));
     bar.finish_and_clear();
     match result {
         Ok(r) => {
