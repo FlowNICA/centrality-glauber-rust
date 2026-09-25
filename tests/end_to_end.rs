@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use centrality_glauber_rust::{FitConfig, Mode};
+use centrality_glauber_rust::{FitConfig, FitMethod, Mode};
 use oxiroot::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -137,6 +137,49 @@ fn fit_recovers_generated_parameters() {
     let mu = best.read_branch(&qa, "mu").unwrap();
     assert_eq!(mu.as_f32().unwrap(), &[result.best.mu]);
 
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn likelihood_fit_recovers_generated_parameters() {
+    let dir = temp_dir("likelihood");
+    let (glauber, data) = write_inputs(&dir, 50_000);
+
+    let config = FitConfig::builder()
+        .glauber(&glauber, "nt_toy")
+        .data(&data, "hMult")
+        .out_dir(dir.join("out"))
+        .mode(Mode::Default)
+        .fit_method(FitMethod::Likelihood)
+        .f_range(TRUE_F, TRUE_F, 0.)
+        .k_range(1.0, 2.0, 0.25)
+        .p_range(0., 0., 0.)
+        .fit_range(20, 300)
+        .n_iter(15)
+        .seed(42)
+        .build()
+        .unwrap();
+
+    let result = centrality_glauber_rust::Fitter::new(config)
+        .unwrap()
+        .fit()
+        .unwrap();
+    println!("{result:?}");
+    assert!(
+        (result.best.mu as f64 - TRUE_MU).abs() < 0.05,
+        "mu = {}",
+        result.best.mu
+    );
+    assert!(
+        (result.best.k as f64 - TRUE_K).abs() <= 0.25,
+        "k = {}",
+        result.best.k
+    );
+    assert!(
+        result.chi2 > 0. && result.chi2 < 3.,
+        "-2lnL/ndf = {}",
+        result.chi2
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

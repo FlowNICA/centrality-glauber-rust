@@ -29,9 +29,24 @@ a second (pile-up) event is added. The functional form of `Na` is chosen by `mod
 
 The fitter scans a grid of `(f, k, p)`. For each grid point it finds the best
 `mu` with a golden-section search in `[0, max_multiplicity / Na_max(f)]`,
-minimizing χ²/ndf between the data and the model normalized in the fit range.
-All grid points are fitted together, and each iteration runs in parallel on all
-cores.
+minimizing a fit statistic between the data and the model normalized in the
+fit range. All grid points are fitted together, and each iteration runs in
+parallel on all cores.
+
+The statistic is chosen by `fit_method`:
+
+- `Chi2` (default, as in the C++ version): χ²/ndf with the statistical errors
+  of both the data and the model. Bins with empty data are skipped.
+- `Likelihood`: maximum Poisson likelihood. The fitter minimizes the
+  likelihood-ratio χ² (Baker–Cousins),
+  `−2 ln(L / L_saturated) = 2 Σ [m − d + d·ln(d/m)]`, divided by the number of
+  bins in the fit range. This differs from −2 ln L only by a constant, so its
+  minimum is the maximum-likelihood estimate, and like χ²/ndf it is ≈ 1 for a
+  good fit. All bins in the fit range are used, including those with empty
+  data. Model bins with no simulated events are counted as 0.1 events, so the
+  logarithm stays finite. The model's own statistical fluctuations are not in
+  the likelihood; with 10× more simulated events than data, they raise the
+  value by roughly 10%.
 
 ## Requirements
 
@@ -73,6 +88,7 @@ The `fit` section is a port of the original `config.c`:
         p: (min: 0.001, max: 0.05, step: 0.001),
         mult_min: 10,                                 // fit range, data histogram bins
         mult_max: 110,
+        fit_method: Chi2,                             // Chi2 or Likelihood
         bin_size: 1.0,                                // bin width of the Npart/Ncoll histograms
         mode: "STAR",                                 // Number of ancestors parametrization
         // n_threads: 8,                              // default: all cores
@@ -104,6 +120,9 @@ Both files are written to `out_dir`:
 - `fit_<f_min>_<k_min>_<k_max>_<p_min>_<mult_min>.root`: tree `test_tree` with
   one entry per `(f, k, p)` grid point. Its branches are `f`, `mu`, `k`, `p`,
   `chi2`, `chi2_error` and `sigma`, where `mu` is the best value for that point.
+  With `fit_method: Likelihood`, `chi2` holds −2 ln(L/L_sat)/ndf, and
+  `chi2_error` is its error from the model's statistical fluctuations. The
+  branch names are the same for both methods.
 - `glauber_qa.root`, which contains:
   - the input data histogram (under its original name);
   - the best-fit model: `glaub_fit_histo` (total), `glaub_plp_histo` (pile-up

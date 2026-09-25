@@ -18,7 +18,7 @@ pub mod glauber;
 pub mod mode;
 pub mod output;
 
-pub use config::{Distribution, FitConfig, FitConfigBuilder, ScanRange};
+pub use config::{Distribution, FitConfig, FitConfigBuilder, FitMethod, ScanRange};
 pub use error::{Error, Result};
 pub use fitter::{FitParams, FitProgress, FitResult, Fitter, ModelHistograms, ScanPoint};
 pub use glauber::GlauberEvents;

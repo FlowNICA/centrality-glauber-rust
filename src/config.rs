@@ -88,6 +88,28 @@ impl Distribution {
     }
 }
 
+/// Statistic minimized to find the optimal fit parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum FitMethod {
+    /// Minimum chi2 (Neyman chi2 with the data and model statistical errors),
+    /// as in the original framework.
+    #[default]
+    Chi2,
+    /// Maximum Poisson likelihood: minimizes the likelihood ratio chi2
+    /// `-2 ln(L / L_saturated) = 2 sum(m - d + d ln(d / m))` (Baker-Cousins).
+    Likelihood,
+}
+
+impl FitMethod {
+    /// Label of the minimized statistic per degree of freedom.
+    pub fn statistic_name(self) -> &'static str {
+        match self {
+            FitMethod::Chi2 => "chi2/ndf",
+            FitMethod::Likelihood => "-2lnL/ndf",
+        }
+    }
+}
+
 /// Full configuration of a Glauber fit. Create it with [`FitConfig::builder`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct FitConfig {
@@ -113,6 +135,8 @@ pub struct FitConfig {
     pub fit_min_bin: usize,
     /// Last bin of the chi2 range.
     pub fit_max_bin: usize,
+    /// Minimum chi2 or maximum likelihood.
+    pub fit_method: FitMethod,
     /// Bin width of the `Npart` and `Ncoll` histograms.
     pub bin_size: f32,
     /// Functional form of the number of ancestors.
@@ -163,6 +187,7 @@ pub struct FitConfigBuilder {
     fit_min_bin: usize,
     #[serde(rename = "mult_max")]
     fit_max_bin: usize,
+    fit_method: FitMethod,
     bin_size: f32,
     mode: Mode,
     n_threads: Option<usize>,
@@ -184,6 +209,7 @@ impl Default for FitConfigBuilder {
             p: ScanRange::new(0.001, 0.05, 0.001),
             fit_min_bin: 10,
             fit_max_bin: 110,
+            fit_method: FitMethod::Chi2,
             bin_size: 1.,
             mode: Mode::Star,
             n_threads: None,
@@ -270,6 +296,11 @@ impl FitConfigBuilder {
         self
     }
 
+    pub fn fit_method(mut self, fit_method: FitMethod) -> Self {
+        self.fit_method = fit_method;
+        self
+    }
+
     pub fn bin_size(mut self, bin_size: f32) -> Self {
         self.bin_size = bin_size;
         self
@@ -353,6 +384,7 @@ impl FitConfigBuilder {
             p: self.p,
             fit_min_bin: self.fit_min_bin,
             fit_max_bin: self.fit_max_bin,
+            fit_method: self.fit_method,
             bin_size: self.bin_size,
             mode: self.mode,
             n_threads,
@@ -387,6 +419,7 @@ mod tests {
         assert_eq!(c.mode, Mode::Star);
         assert_eq!((c.fit_min_bin, c.fit_max_bin), (10, 110));
         assert_eq!(c.k, ScanRange::new(0.5, 1.0, 0.01));
+        assert_eq!(c.fit_method, FitMethod::Chi2);
         assert!(c.n_threads >= 1);
     }
 
@@ -421,6 +454,7 @@ mod tests {
         assert_eq!((c.fit_min_bin, c.fit_max_bin), (10, 110));
         assert_eq!(c.mode, Mode::Star);
         assert_eq!(c.distribution, Distribution::Gamma);
+        assert_eq!(c.fit_method, FitMethod::Chi2);
         assert!(!c.glauber_file.starts_with("~"));
     }
 
@@ -430,18 +464,21 @@ mod tests {
             r#"(
                 other_step: (whatever: [1, 2], mode: 3),
                 fit: (glauber_file: "g.root", glauber_tree: "t", data_file: "d.root",
-                      data_hist: "h", mode: "hades", n_threads: 3, seed: 5),
+                      data_hist: "h", mode: "hades", n_threads: 3, seed: 5,
+                      fit_method: Likelihood),
             )"#,
         )
         .unwrap()
         .build()
         .unwrap();
         assert_eq!(c.mode, Mode::Hades);
+        assert_eq!(c.fit_method, FitMethod::Likelihood);
         assert_eq!((c.n_threads, c.seed), (3, Some(5)));
         assert_eq!(c.n_iter, 20);
 
         assert!(FitConfigBuilder::from_ron_str("(fit: (typo_field: 1))").is_err());
         assert!(FitConfigBuilder::from_ron_str(r#"(fit: (mode: "nope"))"#).is_err());
+        assert!(FitConfigBuilder::from_ron_str("(fit: (fit_method: Nope))").is_err());
         assert!(FitConfigBuilder::from_ron_str(r#"(glauber_file: "g.root")"#).is_err());
     }
 

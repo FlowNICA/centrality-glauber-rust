@@ -7,7 +7,7 @@ use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution as _, Gamma};
 use rayon::prelude::*;
 
-use crate::config::FitConfig;
+use crate::config::{FitConfig, FitMethod};
 use crate::error::{Error, Result};
 use crate::glauber::GlauberEvents;
 use crate::mode::Mode;
@@ -16,7 +16,9 @@ use crate::mode::Mode;
 const CHI2_INVALID: f64 = 1e10;
 /// Number of random draws in the per-ancestor multiplicity histogram.
 const NBD_SAMPLES: usize = 100_000;
-
+/// Simulated count used for an empty model bin in the likelihood, so that an
+/// empty model bin with data gives a large but finite penalty instead of `ln 0`.
+const MIN_MODEL_COUNT: f64 = 0.1;
 /// Parameters of the multiplicity model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FitParams {
@@ -41,6 +43,8 @@ impl FitParams {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScanPoint {
     pub params: FitParams,
+    /// Fit statistic per degree of freedom: chi2/ndf, or -2lnL/ndf with
+    /// [`FitMethod::Likelihood`].
     pub chi2: f32,
     pub chi2_error: f32,
     /// `false` if the point was skipped (e.g. non-positive `mu` range).
@@ -50,7 +54,7 @@ pub struct ScanPoint {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FitResult {
     pub best: FitParams,
-    /// Best chi2/ndf.
+    /// Best fit statistic per degree of freedom (see [`ScanPoint::chi2`]).
     pub chi2: f32,
     pub chi2_error: f32,
     /// All scanned (f, k, p) points with their optimal `mu`.
@@ -72,7 +76,9 @@ pub enum FitProgress {
         iter: u32,
         n_iter: u32,
         best: FitParams,
+        /// Best fit statistic per degree of freedom of `method`.
         chi2: f64,
+        method: FitMethod,
         elapsed: Duration,
     },
     /// The scan is done.
@@ -91,11 +97,16 @@ impl FitProgress {
                 n_iter,
                 best,
                 chi2,
+                method,
                 elapsed,
             } => Some(format!(
-                "FitGlauber: iteration [{iter}/{n_iter}] best chi2/ndf = {chi2:.4} \
+                "FitGlauber: iteration [{iter}/{n_iter}] best {} = {chi2:.4} \
                  (f = {} mu = {:.4} k = {} p = {}) ({elapsed:.1?})",
-                best.f, best.mu, best.k, best.p
+                method.statistic_name(),
+                best.f,
+                best.mu,
+                best.k,
+                best.p
             )),
             _ => None,
         }
@@ -221,6 +232,7 @@ impl Fitter {
         println!("Last data bin (fNbins): {n_bins}");
         println!("Maximum multiplicity (fMaxValue): {max_value}");
         println!("Threads: {}", config.n_threads);
+        println!("Fit method: {:?}", config.fit_method);
 
         Ok(Self {
             config,
@@ -364,6 +376,7 @@ impl Fitter {
                         p: best.p,
                     },
                     chi2,
+                    method: self.config.fit_method,
                     elapsed: start.elapsed(),
                 });
             }
@@ -619,7 +632,7 @@ impl Fitter {
 
     fn update_chi2(&self, grid: &mut [GridPoint], evals: &[Evaluation], counts: &[Vec<f64>]) {
         for (eval, c) in evals.iter().zip(counts) {
-            let (chi2, error) = self.chi2(c);
+            let (chi2, error) = self.statistic(c);
             let gp = &mut grid[eval.g];
             if eval.is_mu2 {
                 gp.chi2_mu2 = chi2;
@@ -648,12 +661,9 @@ impl Fitter {
     /// are; ndf is the number of used bins.
     fn chi2(&self, counts: &[f64]) -> (f64, f64) {
         let (low, high) = self.chi2_bins();
-        let model_int: f64 = (low + 1..=high).map(|b| counts[b]).sum();
-        let data_int: f64 = (low + 1..=high).map(|b| self.data_content(b)).sum();
-        if model_int == 0. {
+        let Some(scale) = self.model_scale(counts) else {
             return (CHI2_INVALID, 0.);
-        }
-        let scale = data_int / model_int;
+        };
 
         let mut sum_chi2 = 0.;
         let mut sum_error = 0.;
@@ -679,6 +689,54 @@ impl Fitter {
             return (CHI2_INVALID, 0.);
         }
         (sum_chi2 / ndf as f64, 2. * sum_error.sqrt() / ndf as f64)
+    }
+
+    /// Poisson likelihood ratio chi2 `-2 ln(L / L_saturated) / ndf` of the model
+    /// counts normalized to the data, and its error from the model statistics.
+    /// All bins of the chi2 range are used (also those with empty data), so
+    /// ndf does not depend on the model and minimizing this maximizes ln L.
+    fn likelihood_chi2(&self, counts: &[f64]) -> (f64, f64) {
+        let (low, high) = self.chi2_bins();
+        let Some(scale) = self.model_scale(counts) else {
+            return (CHI2_INVALID, 0.);
+        };
+
+        if high < low {
+            return (CHI2_INVALID, 0.);
+        }
+
+        let mut sum = 0.;
+        let mut sum_error = 0.;
+        for (bin, &count) in counts.iter().enumerate().take(high + 1).skip(low) {
+            let data = self.data_content(bin);
+            let model = count.max(MIN_MODEL_COUNT) * scale;
+            sum += model - data;
+            if data > 0. {
+                sum += data * (data / model).ln();
+            }
+            /* d(-2 ln L)/dm times the statistical error of the model */
+            let model_error = count.sqrt() * scale;
+            sum_error += (2. * (1. - data / model) * model_error).powi(2);
+        }
+        let ndf = (high - low + 1) as f64;
+        (2. * sum / ndf, sum_error.sqrt() / ndf)
+    }
+
+    /// Fit statistic per degree of freedom of the configured method, and its error.
+    fn statistic(&self, counts: &[f64]) -> (f64, f64) {
+        match self.config.fit_method {
+            FitMethod::Chi2 => self.chi2(counts),
+            FitMethod::Likelihood => self.likelihood_chi2(counts),
+        }
+    }
+
+    /// Factor normalizing the model counts to the data in the fit range, or
+    /// `None` if the model is empty there.
+    fn model_scale(&self, counts: &[f64]) -> Option<f64> {
+        let (low, high) = self.chi2_bins();
+        let model_int: f64 = (low + 1..=high).map(|b| counts[b]).sum();
+        let data_int: f64 = (low + 1..=high).map(|b| self.data_content(b)).sum();
+        (model_int != 0.).then(|| data_int / model_int)
     }
 
     /// Independent random stream for (stream, a, b).

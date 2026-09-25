@@ -39,20 +39,33 @@ fn main() -> ExitCode {
             println_above(&bar, p);
         }
         FitProgress::Iteration {
-            iter, n_iter, chi2, ..
+            iter,
+            n_iter,
+            chi2,
+            method,
+            ..
         } => {
-            bar.set_message(format!("iteration {iter}/{n_iter}, chi2/ndf = {chi2:.4}"));
+            bar.set_message(format!(
+                "iteration {iter}/{n_iter}, {} = {chi2:.4}",
+                method.statistic_name()
+            ));
             println_above(&bar, p);
         }
         FitProgress::Finish => bar.finish_and_clear(),
     };
-    let result = FitConfig::from_ron_file(&args.config)
-        .and_then(|config| centrality_glauber_rust::run_with_progress(config, &progress));
+    let result = FitConfig::from_ron_file(&args.config).and_then(|config| {
+        let method = config.fit_method;
+        centrality_glauber_rust::run_with_progress(config, &progress).map(|r| (r, method))
+    });
     bar.finish_and_clear();
     match result {
-        Ok(r) => {
+        Ok((r, method)) => {
             println!();
-            println!("Results of the fit:");
+            println!(
+                "Results of the fit ({:?}, chi2 = {}):",
+                method,
+                method.statistic_name()
+            );
             println!(
                 "f = {}    mu = {}    k = {}    p = {}    chi2 = {}    chi2_error = {}",
                 r.best.f, r.best.mu, r.best.k, r.best.p, r.chi2, r.chi2_error

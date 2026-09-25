@@ -7,27 +7,32 @@
     // bin/fit: MC-Glauber multiplicity fit, port of config.c
     fit: (
         // Input file from MC-Glauber
-        glauber_file: "/run/media/peter/msd1tb/Soft/oxy-glauber/TGlauberMC_Au_Au_snn30.0_md0.4_om0.0_rc1_smax99.root",
+        glauber_file: "~/glaub_new_auau_3gev_6M.root",
         glauber_tree: "glauber",
 
         // Input file with data multiplicity
-        data_file: "/run/media/peter/msd1tb/Soft/CentralityFramework/Framework/McGlauber/centrality-master/input/test_input.root",
-        data_hist: "hMreco",
+        data_file: "~/star_mult_3gev_hist_500k.root",
+        data_hist: "hRefMult",
 
         // Output directory
-        out_dir: "./test-check/",
+        out_dir: "./centrality-glauber-rust-check-likelihood/",
 
         // Number of iterations to find the optimal mu parameter
-        n_iter: 10,
+        n_iter: 20,
 
         // Parameters for the multiplicity fit
-        f: (min: 0.1, max: 1.0, step: 0.1),
-        k: (min: 1.0, max: 10.0, step: 1.0),
-        p: (min: 0.0, max: 0.0, step: 0.001),
+        f: (min: 0.9, max: 0.9, step: 0.01),
+        k: (min: 0.5, max: 1.0, step: 0.1),
+        p: (min: 0.002, max: 0.005, step: 0.001),
 
         // Fit range (bins of the data histogram)
-        mult_min: 20,
-        mult_max: 480,
+        mult_min: 10,
+        mult_max: 110,
+
+        // Statistic minimized to find the optimal parameters:
+        //   Chi2       - minimum chi2 (as in the original framework)
+        //   Likelihood - maximum Poisson likelihood, via -2 ln(L / L_saturated)
+        fit_method: Likelihood,
 
         // Bin size of the Npart/Ncoll histograms
         bin_size: 1.0,
