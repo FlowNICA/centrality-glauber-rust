@@ -396,7 +396,7 @@ impl FitConfigBuilder {
 }
 
 /// Replaces a leading `~` with `$HOME`.
-fn expand_home(path: &Path) -> PathBuf {
+pub(crate) fn expand_home(path: &Path) -> PathBuf {
     match (path.strip_prefix("~"), std::env::var_os("HOME")) {
         (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => path.to_path_buf(),

@@ -4,7 +4,9 @@ A Rust port of the MC-Glauber multiplicity fitter from
 [CentralityFramework](https://github.com/FlowNICA/CentralityFramework/tree/parallel-params-fitter/Framework/McGlauber/centrality-master/glauber).
 It reads a data multiplicity histogram and an MC-Glauber tree, fits the
 multiplicity with a Glauber-based model, and writes the fit results and QA
-histograms to ROOT files.
+histograms to ROOT files (`fit`). From the fit results, it then defines
+centrality classes: multiplicity borders and the mean impact parameter,
+`Npart` and `Ncoll` of each class (`define-centrality`).
 
 **NOTE**: This is a very early version, developed with AI-assisted tools. It may not yet be ready for use in a formal analysis.
 
@@ -140,6 +142,63 @@ Both files are written to `out_dir`:
   - `gamma` (or `nbd`): the multiplicity from a single ancestor;
   - tree `BestResult`: `mu`, `f`, `k`, `p`, `chi2` and `chi2_error` of the best fit.
 
+### Centrality classes
+
+`define-centrality` combines `HistoCut.C`, `CentralityClasses.C` and
+`printFinal.C`. It reads the QA file of the fit, using the `centrality` section
+of the same configuration file:
+
+```sh
+cargo run --release --bin define-centrality -- config.ron
+```
+
+```ron
+    centrality: (
+        qa_file: "./out/glauber_qa.root",   // QA file written by fit
+        data_hist: "hRefMult",              // data histogram (the QA file has a copy)
+        // data_file: "~/data.root",        // default: qa_file
+        out_dir: ".",
+        final_file: "FINAL.root",
+        n_classes: 10,                      // classes of equal width in percent
+        table_formats: [Csv],               // any of Tex, Csv, Cpp
+        table_name: "centrality_table",     // <table_name>.tex/.csv/.C in out_dir
+    ),
+```
+
+Only `qa_file` and `data_hist` are required.
+
+How it works:
+
+1. **Class borders.** The classes are defined with the single-event model
+   `glaub_sng_histo`. Starting from the highest multiplicity and going down,
+   each bin goes to the class that its cumulative fraction (including the bin)
+   falls in, so each class holds `1/n_classes` of the single events. Bin 1
+   (multiplicity 0) is not used. The pile-up dominated tail is not assigned to
+   any class; it starts at the first bin where `glaub_plp_histo` exceeds
+   `glaub_sng_histo`. Its single events still count toward the most central
+   class. A class covers multiplicities `[MinBorder, MaxBorder)`, and each
+   class starts exactly where the previous one ends.
+2. **Class averages.** `<b>`, `<Npart>` and `<Ncoll>` and their RMS are
+   computed from the projections of `B/Npart/Ncoll_VS_Multiplicity` over the
+   multiplicity bins of each class.
+3. **Ranges.** A polynomial of degree 5 (lower if there are fewer than 6
+   classes) is fitted to the averages versus centrality, with the RMS as
+   errors. Its values at the class edges give the min/max columns of the table.
+
+The table is always printed to stdout. `FINAL.root` in `out_dir` contains:
+
+- tree `Result`, one entry per class: `Ncc`, `MinPercent`, `MaxPercent`,
+  `MinBorder`, `MaxBorder`, and for `B`, `Npart` and `Ncoll` the branches
+  `<X>Average`, `<X>Width` (RMS), `<X>Min` and `<X>Max`;
+- `B/Npart/Ncoll_average_VS_Centrality`: the averages versus centrality, with
+  the RMS as bin errors. The original `printFinal.C` can read this file;
+- `B/Npart/Ncoll_VS_CentralityClass <min>%-<max>%`: the distributions in each
+  class, plus `... 0%-100%` for all events;
+- `CentralityClass_Fit <min>%-<max>%` and `CentralityClass <min>%-<max>%`: the
+  model and data multiplicity in each class;
+- `Centrality_vs_Multiplicity`: the upper percent of the class of each
+  multiplicity bin.
+
 ## Library use
 
 The fitter can also be used from Rust, with the configuration built in code:
@@ -185,6 +244,27 @@ executable, read it with `config_file::read_section::<YourConfig>(path, "name")`
   truncates `k` to an integer, so `k < 1` gives a degenerate distribution. This
   port uses the real value of `k`. With `distribution: Gamma` (the default),
   the results are the same as before.
+- `define-centrality` fixes several bugs in the macros it replaces, and it
+  writes no canvases or PDFs:
+  - `HistoCut.C` assigns bins with a running sum that it resets to 0 at each
+    class boundary. The boundary bin's events are therefore never counted, and
+    the bin at the start of the most peripheral class belongs to no class. Its
+    `MinBorder`/`MaxBorder` are bin centers on an axis that doesn't quite match
+    the model's, and the data-per-class loop mishandles bins without model
+    events. Here, each bin goes to the class its cumulative fraction falls in,
+    and the classes are contiguous.
+  - `CentralityClasses.C` passes the multiplicity borders to `ProjectionY` as
+    bin numbers, which is off by one bin, and it includes the `MaxBorder` bin in
+    both neighboring classes. Here, the projections cover exactly the bins of
+    each class.
+  - `printFinal.C` drops classes with a zero average from the averages, but not
+    from the percents and borders, which misaligns the table rows. Here, empty
+    classes are removed consistently, with a warning. Its C++ output labels the
+    Npart/Ncoll values at the lower and upper percent as `min`/`max`, which is
+    reversed for quantities that decrease with centrality. Here, `min`/`max`
+    are the actual minimum and maximum. The CSV has no trailing commas, and its
+    first line is a `#` comment. `Centrality_vs_Multiplisity` is renamed
+    `Centrality_vs_Multiplicity`.
 - These C++ behaviors are kept on purpose:
   - The model is normalized over bins `mult_min+1..=mult_max`, while χ² uses
     bins `mult_min..=mult_max`.

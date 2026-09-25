@@ -434,3 +434,105 @@ fn too_few_glauber_events_is_an_error() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn centrality_classes_from_the_fit() {
+    use centrality_glauber_rust::centrality;
+    use centrality_glauber_rust::{CentralityConfig, TableFormat};
+
+    let dir = temp_dir("centrality");
+    let (glauber, data) = write_inputs(&dir, 50_000, false);
+    let out_dir = dir.join("out");
+    let fit_config = FitConfig::builder()
+        .glauber(&glauber, "nt_toy")
+        .data(&data, "hMult")
+        .out_dir(&out_dir)
+        .mode(Mode::Default)
+        .f_range(TRUE_F, TRUE_F, 0.)
+        .k_range(TRUE_K as f32, TRUE_K as f32, 0.)
+        .p_range(0.01, 0.01, 0.)
+        .fit_range(20, 300)
+        .n_iter(10)
+        .seed(5)
+        .build()
+        .unwrap();
+    centrality_glauber_rust::run(fit_config).unwrap();
+
+    let qa_file = out_dir.join(centrality_glauber_rust::output::QA_FILE_NAME);
+    let config = CentralityConfig::builder()
+        .qa_file(&qa_file)
+        .data(None, "hMult")
+        .out_dir(&out_dir)
+        .n_classes(10)
+        .table_formats(vec![TableFormat::Csv, TableFormat::Tex, TableFormat::Cpp])
+        .build()
+        .unwrap();
+    let result = centrality::run(&config).unwrap();
+    print!("{}", result.plain_table());
+    let classes = &result.classes;
+    assert_eq!(classes.len(), 10);
+
+    /* each class holds 10% of the single events, up to one boundary bin */
+    let qa = FileReader::open(&qa_file).unwrap();
+    let single = TH1::read_root(&qa, "glaub_sng_histo").unwrap();
+    let n_bins = single.xaxis.nbins as usize;
+    let integral: f64 = single.contents[2..=n_bins].iter().sum();
+    let max_bin = single.contents[2..=n_bins]
+        .iter()
+        .cloned()
+        .fold(0., f64::max)
+        / integral;
+    let pile_up_start = result
+        .pile_up_border
+        .map_or(n_bins + 1, |border| border as usize + 1);
+    for (i, c) in classes.iter().enumerate() {
+        /* the pile-up tail counts for the most central class */
+        let hi = if i == 0 { n_bins } else { c.bins.1 };
+        let fraction: f64 = single.contents[c.bins.0..=hi].iter().sum::<f64>() / integral;
+        assert!(
+            (fraction - 0.1).abs() <= max_bin + 1e-9,
+            "class {}: fraction {fraction}",
+            c.label()
+        );
+        /* contiguous classes, most central at the highest multiplicity */
+        if i > 0 {
+            assert_eq!(
+                c.max_border,
+                classes[i - 1].min_border,
+                "class {}",
+                c.label()
+            );
+            assert!(c.npart.mean < classes[i - 1].npart.mean);
+            assert!(c.ncoll.mean < classes[i - 1].ncoll.mean);
+            assert!(c.b.mean > classes[i - 1].b.mean);
+        }
+        assert!(c.b.min <= c.b.max && c.npart.min <= c.npart.max);
+    }
+    assert!(classes[0].bins.1 < pile_up_start);
+    assert_eq!(classes[9].min_border, 1.);
+
+    /* FINAL.root and the tables */
+    let fin = FileReader::open(config.final_path()).unwrap();
+    let tree = TreeReader::open(&fin, "Result").unwrap();
+    assert_eq!(tree.num_entries(), 10);
+    let npart = tree.read_branch(&fin, "NpartAverage").unwrap();
+    assert_eq!(npart.as_f64().unwrap()[0], classes[0].npart.mean);
+    for name in [
+        "B_average_VS_Centrality",
+        "Npart_average_VS_Centrality",
+        "Ncoll_average_VS_Centrality",
+        "Npart_VS_CentralityClass 0.0%-10.0%",
+        "B_VS_CentralityClass 0%-100%",
+        "CentralityClass_Fit 90.0%-100.0%",
+        "CentralityClass 0.0%-10.0%",
+        "Centrality_vs_Multiplicity",
+    ] {
+        TH1::read_root(&fin, name).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    let csv = std::fs::read_to_string(config.table_path(TableFormat::Csv)).unwrap();
+    assert_eq!(csv.lines().count(), 12);
+    let cpp = std::fs::read_to_string(config.table_path(TableFormat::Cpp)).unwrap();
+    assert!(cpp.contains("Int_t minMult [10]") && cpp.contains("GetCentMult"));
+    assert!(config.table_path(TableFormat::Tex).exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

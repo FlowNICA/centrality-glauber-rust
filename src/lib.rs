@@ -10,6 +10,7 @@
 // `!(x > 0.)` is used on purpose: it also rejects NaN.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+pub mod centrality;
 pub mod config;
 pub mod config_file;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod glauber;
 pub mod mode;
 pub mod output;
 
+pub use centrality::{CentralityConfig, CentralityResult, TableFormat};
 pub use config::{Distribution, FitConfig, FitConfigBuilder, FitMethod, ScanRange};
 pub use error::{Error, Result};
 pub use fitter::{FitParams, FitProgress, FitResult, Fitter, ModelHistograms, ScanPoint};

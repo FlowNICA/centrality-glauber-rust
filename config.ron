@@ -61,4 +61,30 @@
         // Random seed for reproducible results; omit for a random seed
         // seed: 42,
     ),
+
+    // bin/define-centrality: centrality classes from the fit results,
+    // port of HistoCut.C, CentralityClasses.C and printFinal.C
+    centrality: (
+        // QA file written by the fit (in the fit's out_dir)
+        qa_file: "./centrality-glauber-rust-check-likelihood/glauber_qa.root",
+
+        // Data multiplicity histogram; data_file defaults to qa_file, which
+        // contains a copy of the fitted data histogram
+        // data_file: "~/star_mult_3gev_hist_500k.root",
+        data_hist: "hRefMult",
+
+        // Output directory and name of the output ROOT file
+        out_dir: "./centrality-glauber-rust-check-likelihood/",
+        final_file: "FINAL.root",
+
+        // Number of centrality classes of equal width in percent
+        n_classes: 10,
+
+        // Table files written to out_dir in addition to the table on stdout:
+        //   Tex - LaTeX document (<table_name>.tex)
+        //   Csv - comma separated values (<table_name>.csv)
+        //   Cpp - ROOT macro with arrays and GetCentMult(mult) (<table_name>.C)
+        table_formats: [Csv, Cpp],
+        table_name: "centrality_table",
+    ),
 )
