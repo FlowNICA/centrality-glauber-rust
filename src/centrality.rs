@@ -5,9 +5,10 @@
 //! events, `glaub_sng_histo`: counting from the highest multiplicity down,
 //! each class holds `1 / n_classes` of the single-event integral. For each
 //! class the Glauber observables `B`, `Npart` and `Ncoll` are averaged over
-//! the model events in its multiplicity range (`<name>_VS_Multiplicity`), and
-//! their range is estimated from a polynomial fit of the averages versus
-//! centrality.
+//! the model events in its multiplicity range (`<name>_VS_Multiplicity`). The
+//! range of each observable in a class is the one of a sharp cut in that
+//! observable at the class percents, e.g. `b` from 0 fm in the most central
+//! class.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -21,9 +22,6 @@ use crate::error::{Error, Result};
 
 /// Maximum number of centrality classes.
 const MAX_CLASSES: usize = 1000;
-/// Degree of the polynomial fitted to the class averages versus centrality
-/// (`pol5` as in `printFinal.C`); lower if there are fewer classes.
-const POLY_DEGREE: usize = 5;
 /// Glauber observables averaged per class: (name, axis label).
 const OBSERVABLES: [(&str, &str); 3] =
     [("B", "B, fm"), ("Npart", "N_{part}"), ("Ncoll", "N_{coll}")];
@@ -261,8 +259,8 @@ pub fn class_bins(single: &[f64], pile_up: &[f64], n_classes: usize) -> Result<C
     })
 }
 
-/// Mean and RMS of an observable in a class, and its range in the class from
-/// the polynomial fit of the means versus centrality (NaN if the fit failed).
+/// Mean and RMS of an observable in a class, and its range for a sharp cut in
+/// the observable at the class percents (NaN if there are no events).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ObservableStats {
     pub mean: f64,
@@ -397,26 +395,23 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
         });
     }
 
-    /* ranges of the observables from polynomial fits of the averages versus centrality */
-    for (k, (name, _)) in OBSERVABLES.iter().enumerate() {
-        let points: Vec<(f64, f64, f64)> = classes
-            .iter()
-            .map(|c| {
-                let s = c.stats(k);
-                ((c.min_percent + c.max_percent) / 2., s.mean, s.rms)
-            })
-            .collect();
-        let poly = fit_polynomial(&points);
-        if poly.is_none() {
-            eprintln!("Warning: polynomial fit of <{name}> versus centrality failed");
-        }
+    /*
+     * Ranges of the observables for a sharp cut in each of them, over the
+     * events the class percents refer to (multiplicity bins >= 2): centrality
+     * c is the c-quantile of b, and the (1 - c)-quantile of Npart and Ncoll,
+     * which decrease with centrality. So b starts at 0 in the most central class.
+     */
+    for (k, h2) in vs_multiplicity.iter().enumerate() {
+        let all = project_y(h2, "", Some((2, h2.nx() + 1)));
+        let decreasing = k > 0;
+        let at = |percent: f64| {
+            let q = percent / 100.;
+            quantile(&all, if decreasing { 1. - q } else { q })
+        };
         for c in &mut classes {
-            let (lo, hi) = (c.min_percent, c.max_percent);
+            let (a, b) = (at(c.min_percent), at(c.max_percent));
             let s = c.stats_mut(k);
-            if let Some(p) = &poly {
-                let (a, b) = (eval_polynomial(p, lo), eval_polynomial(p, hi));
-                (s.min, s.max) = (a.min(b), a.max(b));
-            }
+            (s.min, s.max) = (a.min(b), a.max(b));
         }
     }
     for c in &classes {
@@ -542,14 +537,49 @@ fn reset_stats(h: &mut TH1) {
     h.tsumwx2 = 0.;
 }
 
-/// Center of bin `bin` (1-based) of an axis.
-fn bin_center(axis: &TAxis, bin: usize) -> f64 {
+/// Lower and upper edge of bin `bin` (1-based) of an axis.
+fn bin_edges(axis: &TAxis, bin: usize) -> (f64, f64) {
     if axis.xbins.is_empty() {
         let width = (axis.xmax - axis.xmin) / axis.nbins as f64;
-        axis.xmin + (bin as f64 - 0.5) * width
+        let lo = axis.xmin + (bin - 1) as f64 * width;
+        (lo, lo + width)
     } else {
-        (axis.xbins[bin - 1] + axis.xbins[bin]) / 2.
+        (axis.xbins[bin - 1], axis.xbins[bin])
     }
+}
+
+/// Center of bin `bin` (1-based) of an axis.
+fn bin_center(axis: &TAxis, bin: usize) -> f64 {
+    let (lo, hi) = bin_edges(axis, bin);
+    (lo + hi) / 2.
+}
+
+/// `q`-quantile (`0 <= q <= 1`) of a histogram without under- and overflow,
+/// interpolated linearly within the bin: 0 gives the lower edge of the first
+/// filled bin, 1 the upper edge of the last one. NaN if it is empty.
+fn quantile(h: &TH1, q: f64) -> f64 {
+    let n = h.xaxis.nbins as usize;
+    let total: f64 = h.contents[1..=n].iter().sum();
+    if !(total > 0.) {
+        return f64::NAN;
+    }
+    let target = q.clamp(0., 1.) * total;
+    let mut cumulative = 0.;
+    let mut last_edge = f64::NAN;
+    for bin in 1..=n {
+        let c = h.contents[bin];
+        if !(c > 0.) {
+            continue;
+        }
+        let (lo, hi) = bin_edges(&h.xaxis, bin);
+        if cumulative + c >= target {
+            return lo + (target - cumulative) / c * (hi - lo);
+        }
+        cumulative += c;
+        last_edge = hi;
+    }
+    /* q = 1 with rounding */
+    last_edge
 }
 
 /// Mean and RMS of a histogram from its bin centers, without under- and
@@ -567,68 +597,6 @@ fn mean_rms(h: &TH1) -> (f64, f64) {
     }
     let mean = s1 / s0;
     (mean, (s2 / s0 - mean * mean).max(0.).sqrt())
-}
-
-/// Weighted least-squares fit of the polynomial `sum c_i (x / 100)^i` to the
-/// points `(x, y, error)`, of degree [`POLY_DEGREE`] or lower if there are
-/// fewer points. Points with a zero or invalid error are skipped, as in ROOT's
-/// chi2 fits. `None` if no point is left or the system is singular.
-fn fit_polynomial(points: &[(f64, f64, f64)]) -> Option<Vec<f64>> {
-    let points: Vec<_> = points
-        .iter()
-        .filter(|(x, y, e)| *e > 0. && e.is_finite() && x.is_finite() && y.is_finite())
-        .collect();
-    let n = (POLY_DEGREE + 1).min(points.len());
-    if n == 0 {
-        return None;
-    }
-    /* normal equations a c = r */
-    let mut a = vec![vec![0.; n]; n];
-    let mut r = vec![0.; n];
-    for &&(x, y, e) in &points {
-        let w = 1. / (e * e);
-        let powers: Vec<f64> = (0..n).map(|i| (x / 100.).powi(i as i32)).collect();
-        for i in 0..n {
-            r[i] += w * powers[i] * y;
-            for k in 0..n {
-                a[i][k] += w * powers[i] * powers[k];
-            }
-        }
-    }
-    solve(a, r)
-}
-
-/// Solves `a x = r` by Gaussian elimination with partial pivoting.
-fn solve(mut a: Vec<Vec<f64>>, mut r: Vec<f64>) -> Option<Vec<f64>> {
-    let n = r.len();
-    for col in 0..n {
-        let pivot = (col..n).max_by(|&i, &k| a[i][col].abs().total_cmp(&a[k][col].abs()))?;
-        if !(a[pivot][col].abs() > 1e-300) {
-            return None;
-        }
-        a.swap(col, pivot);
-        r.swap(col, pivot);
-        let (upper, lower) = a.split_at_mut(col + 1);
-        let pivot_row = &upper[col];
-        for (row, a_row) in lower.iter_mut().enumerate() {
-            let factor = a_row[col] / pivot_row[col];
-            for (x, p) in a_row[col..].iter_mut().zip(&pivot_row[col..]) {
-                *x -= factor * p;
-            }
-            r[col + 1 + row] -= factor * r[col];
-        }
-    }
-    let mut x = vec![0.; n];
-    for row in (0..n).rev() {
-        let s: f64 = (row + 1..n).map(|k| a[row][k] * x[k]).sum();
-        x[row] = (r[row] - s) / a[row][row];
-    }
-    x.iter().all(|v| v.is_finite()).then_some(x)
-}
-
-fn eval_polynomial(coefficients: &[f64], x: f64) -> f64 {
-    let u = x / 100.;
-    coefficients.iter().rev().fold(0., |acc, c| acc * u + c)
 }
 
 /// Inputs of the output ROOT file besides the result.
@@ -1025,20 +993,23 @@ mod tests {
     }
 
     #[test]
-    fn polynomial_fit() {
-        let f = |x: f64| 3. - 0.2 * x + 1e-3 * x * x;
-        let points: Vec<_> = (0..10)
-            .map(|i| (5. + 10. * i as f64, f(5. + 10. * i as f64), 0.1))
-            .collect();
-        let p = fit_polynomial(&points).unwrap();
-        for x in [0., 37., 100.] {
-            assert!((eval_polynomial(&p, x) - f(x)).abs() < 1e-8, "x = {x}");
+    fn quantiles() {
+        /* one entry per unit bin over [0, 10) */
+        let mut h = Hist::reg(10, 0., 10.).double();
+        for x in 0..10 {
+            h.fill(x as f64 + 0.5);
         }
-        /* two points: a line; zero errors are skipped */
-        let p = fit_polynomial(&[(10., 1., 0.1), (30., 3., 0.2), (50., 99., 0.)]).unwrap();
-        assert_eq!(p.len(), 2);
-        assert!((eval_polynomial(&p, 20.) - 2.).abs() < 1e-12);
-        assert!(fit_polynomial(&[(10., 1., 0.)]).is_none());
+        assert_eq!(quantile(&h, 0.), 0.);
+        assert!((quantile(&h, 0.25) - 2.5).abs() < 1e-12);
+        assert!((quantile(&h, 1.) - 10.).abs() < 1e-12);
+        /* empty bins at the edges: from the first to the last filled bin */
+        let mut h = Hist::reg(10, 0., 10.).double();
+        h.fill(3.5);
+        h.fill(6.5);
+        assert_eq!(quantile(&h, 0.), 3.);
+        assert!((quantile(&h, 0.5) - 4.).abs() < 1e-12);
+        assert!((quantile(&h, 1.) - 7.).abs() < 1e-12);
+        assert!(quantile(&Hist::reg(10, 0., 10.).double(), 0.5).is_nan());
     }
 
     fn class(number: usize, borders: (f64, f64)) -> CentralityClass {

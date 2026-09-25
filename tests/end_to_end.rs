@@ -511,6 +511,19 @@ fn centrality_classes_from_the_fit() {
     assert!(classes[0].bins.1 < pile_up_start);
     assert_eq!(classes[9].min_border, 1.);
 
+    /*
+     * Ranges from a sharp cut in each observable: the most central class
+     * starts at b = 0 (and ends at the largest Npart), and neighboring
+     * classes share their edges
+     */
+    assert_eq!(classes[0].b.min, 0.);
+    assert!(classes[0].npart.max > classes[0].npart.mean + classes[0].npart.rms);
+    for w in classes.windows(2) {
+        assert_eq!(w[1].b.min, w[0].b.max);
+        assert_eq!(w[1].npart.max, w[0].npart.min);
+        assert_eq!(w[1].ncoll.max, w[0].ncoll.min);
+    }
+
     /* FINAL.root and the tables */
     let fin = FileReader::open(config.final_path()).unwrap();
     let tree = TreeReader::open(&fin, "Result").unwrap();

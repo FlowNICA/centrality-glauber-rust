@@ -181,9 +181,17 @@ How it works:
 2. **Class averages.** `<b>`, `<Npart>` and `<Ncoll>` and their RMS are
    computed from the projections of `B/Npart/Ncoll_VS_Multiplicity` over the
    multiplicity bins of each class.
-3. **Ranges.** A polynomial of degree 5 (lower if there are fewer than 6
-   classes) is fitted to the averages versus centrality, with the RMS as
-   errors. Its values at the class edges give the min/max columns of the table.
+3. **Ranges.** The min/max columns give the range that a sharp cut on the
+   observable itself would select for the class's percents. They are computed
+   over all events with multiplicity > 0, the same events the percents refer
+   to. For `b`, centrality `c` corresponds to the `c`-quantile of the `b`
+   distribution. For `Npart` and `Ncoll`, which decrease with centrality, it
+   is the `(1 − c)`-quantile. The values are interpolated linearly within
+   bins. So the 0–10% class starts at `b` = 0 fm and at the largest
+   `Npart`/`Ncoll`, the 100% edge is at the largest `b` and the smallest
+   `Npart`/`Ncoll`, and neighboring classes share their edges. Because
+   multiplicity fluctuates at a given `b`, a class's mean can lie slightly
+   outside this range, mostly in peripheral classes.
 
 The table is always printed to stdout. `FINAL.root` in `out_dir` contains:
 
@@ -257,6 +265,13 @@ executable, read it with `config_file::read_section::<YourConfig>(path, "name")`
     bin numbers, which is off by one bin, and it includes the `MaxBorder` bin in
     both neighboring classes. Here, the projections cover exactly the bins of
     each class.
+  - `printFinal.C` takes the min/max columns from a degree-5 polynomial fitted
+    to the class averages versus centrality. At the edges that is an
+    extrapolation: `b_min` of the most central class is not 0 (1.86 fm instead
+    of 0 on the 3 GeV Au+Au data), and `Npart_max` stays well below the largest
+    `Npart`. Here, they come from sharp-cut quantiles (see above). Running
+    `printFinal.C` on `FINAL.root` still gives its own polynomial values in
+    these columns.
   - `printFinal.C` drops classes with a zero average from the averages, but not
     from the percents and borders, which misaligns the table rows. Here, empty
     classes are removed consistently, with a warning. Its C++ output labels the
