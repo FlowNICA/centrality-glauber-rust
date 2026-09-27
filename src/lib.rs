@@ -19,8 +19,11 @@ pub mod glauber;
 pub mod mode;
 pub mod output;
 
-pub use centrality::{CentralityConfig, CentralityResult, TableFormat};
-pub use config::{Distribution, FitConfig, FitConfigBuilder, FitMethod, ScanRange};
+pub use centrality::CentralityResult;
+pub use config::{
+    CentralityConfig, CentralityConfigBuilder, Distribution, FitConfig, FitConfigBuilder,
+    FitMethod, ScanRange, TableFormat,
+};
 pub use error::{Error, Result};
 pub use fitter::{FitParams, FitProgress, FitResult, Fitter, ModelHistograms, ScanPoint};
 pub use glauber::GlauberEvents;
