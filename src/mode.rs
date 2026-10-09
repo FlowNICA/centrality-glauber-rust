@@ -16,6 +16,8 @@ use crate::error::Error;
 /// | `NcollFast` | Ncoll^f / 100^f            |
 /// | `STAR`      | (1-f)*Npart/2 + f*Ncoll    |
 /// | `HADES`     | (1 - f*Npart^2)*Npart      |
+/// | 'TOF'       | f + Npart                  |
+/// | 'TOF2'      | f + Npart^2                |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(try_from = "String")]
 pub enum Mode {
@@ -27,10 +29,11 @@ pub enum Mode {
     NcollFast,
     Star,
     Hades,
+    Tof,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 8] = [
+    pub const ALL: [Mode; 9] = [
         Mode::Default,
         Mode::Psd,
         Mode::Npart,
@@ -39,6 +42,7 @@ impl Mode {
         Mode::NcollFast,
         Mode::Star,
         Mode::Hades,
+        Mode::Tof,
     ];
 
     /// Number of ancestors for an event with the given `Npart` and `Ncoll`.
@@ -52,6 +56,7 @@ impl Mode {
             Mode::NcollFast => ncoll.powf(f) / 100f64.powf(f),
             Mode::Star => (1. - f) * npart / 2. + f * ncoll,
             Mode::Hades => (1. - f * npart * npart) * npart,
+            Mode::Tof => f + npart,
         }
     }
 
@@ -74,6 +79,7 @@ impl Mode {
             Mode::NcollFast => "NcollFast",
             Mode::Star => "STAR",
             Mode::Hades => "HADES",
+            Mode::Tof => "TOF",
         }
     }
 }
