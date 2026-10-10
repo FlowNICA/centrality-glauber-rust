@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use oxiroot::prelude::TAxis;
 use serde::Deserialize;
 
 use crate::config_file;
@@ -70,8 +71,8 @@ impl ScanRange {
 }
 
 /// Distribution of the multiplicity produced by one ancestor, with mean `mu`
-/// and variance `mu (1 + mu / k)`. It is used both in the fit and for the
-/// per-ancestor output histogram (`gamma` or `nbd`).
+/// and variance `mu (1 + mu / k)` ([`Distribution::GammaScaleFree`]: `mu^2 / k`).
+/// It is used both in the fit and for the per-ancestor output histogram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 pub enum Distribution {
     /// Continuous Gamma distribution, as in the original framework's fit.
@@ -79,6 +80,10 @@ pub enum Distribution {
     Gamma,
     /// Negative binomial distribution (integer multiplicities).
     Nbd,
+    /// Gamma distribution with shape `k` and scale `mu / k`: the variance
+    /// `mu^2 / k` has no Poisson term, so `k` and the fit do not depend on
+    /// the units of a continuous observable such as energy.
+    GammaScaleFree,
 }
 
 impl Distribution {
@@ -86,6 +91,15 @@ impl Distribution {
         match self {
             Distribution::Gamma => "gamma",
             Distribution::Nbd => "nbd",
+            Distribution::GammaScaleFree => "gamma_scale_free",
+        }
+    }
+
+    /// Variance of the value produced by one ancestor.
+    pub fn variance(self, mu: f64, k: f64) -> f64 {
+        match self {
+            Distribution::Gamma | Distribution::Nbd => mu * (1. + mu / k),
+            Distribution::GammaScaleFree => mu * mu / k,
         }
     }
 }
@@ -137,11 +151,13 @@ pub struct FitConfig {
     pub fit_min_bin: usize,
     /// Last bin of the chi2 range.
     pub fit_max_bin: usize,
+    /// Fit range `[min, max)` in units of the data (`fit_min`, `fit_max`)
+    /// instead of bins. The bins are then set from the data histogram by
+    /// [`FitConfig::resolve_fit_bins`] (done by the fitter); until then
+    /// `fit_min_bin` and `fit_max_bin` are 0.
+    pub fit_values: Option<(f64, f64)>,
     /// Minimum chi2 or maximum likelihood.
     pub fit_method: FitMethod,
-    /// Bin width of the `Npart` and `Ncoll` histograms (f64 so that e.g. 0.1
-    /// gives bin edges at integers). Does not affect the fit.
-    pub bin_size: f64,
     /// Functional form of the number of ancestors.
     pub mode: Mode,
     /// Number of worker threads.
@@ -158,6 +174,41 @@ impl FitConfig {
 
     /// Name of the section of the shared RON file read by `bin/fit`.
     pub const RON_SECTION: &'static str = "fit";
+
+    /// With [`fit_values`](Self::fit_values), sets `fit_min_bin` and
+    /// `fit_max_bin` to the bins of the uniform data axis covering
+    /// `[min, max)`: from the bin containing `min` to the bin containing `max`,
+    /// or the bin before if `max` is on a bin edge, within the axis.
+    pub fn resolve_fit_bins(&mut self, axis: &TAxis) -> Result<()> {
+        let Some((min, max)) = self.fit_values else {
+            return Ok(());
+        };
+        let nbins = axis.nbins.max(0) as usize;
+        if !axis.xbins.is_empty() || nbins == 0 {
+            return Err(Error::Input(
+                "data histogram must have uniform binning".into(),
+            ));
+        }
+        if !(min < axis.xmax && max > axis.xmin) {
+            return Err(Error::Config(format!(
+                "fit range [{min}, {max}) is outside the data histogram [{}, {})",
+                axis.xmin, axis.xmax
+            )));
+        }
+        let width = (axis.xmax - axis.xmin) / nbins as f64;
+        /* bin edges count as on the edge within a relative 1e-9 of a bin */
+        let position = |x: f64| (x - axis.xmin) / width;
+        let lo = (position(min) + 1e-9).floor().max(0.) as usize + 1;
+        let hi = ((position(max) - 1e-9).ceil() as usize).min(nbins);
+        if lo > hi {
+            return Err(Error::Config(format!(
+                "fit range [{min}, {max}) holds no data histogram bin"
+            )));
+        }
+        self.fit_min_bin = lo;
+        self.fit_max_bin = hi;
+        Ok(())
+    }
 
     /// Reads and validates the [`RON_SECTION`](Self::RON_SECTION) section of
     /// a RON configuration file, see `config.ron`.
@@ -187,11 +238,12 @@ pub struct FitConfigBuilder {
     k: ScanRange,
     p: ScanRange,
     #[serde(rename = "mult_min")]
-    fit_min_bin: usize,
+    fit_min_bin: Option<usize>,
     #[serde(rename = "mult_max")]
-    fit_max_bin: usize,
+    fit_max_bin: Option<usize>,
+    fit_min: Option<f64>,
+    fit_max: Option<f64>,
     fit_method: FitMethod,
-    bin_size: f64,
     mode: Mode,
     n_threads: Option<usize>,
     distribution: Distribution,
@@ -210,10 +262,11 @@ impl Default for FitConfigBuilder {
             f: ScanRange::new(0.1, 0.1, 0.01),
             k: ScanRange::new(0.5, 1.0, 0.01),
             p: ScanRange::new(0.001, 0.05, 0.001),
-            fit_min_bin: 10,
-            fit_max_bin: 110,
+            fit_min_bin: None,
+            fit_max_bin: None,
+            fit_min: None,
+            fit_max: None,
             fit_method: FitMethod::Chi2,
-            bin_size: 1.,
             mode: Mode::Star,
             n_threads: None,
             distribution: Distribution::Gamma,
@@ -282,30 +335,34 @@ impl FitConfigBuilder {
         self
     }
 
-    /// Bin range `[min, max]` of the data histogram used for chi2.
+    /// Bin range `[min, max]` of the data histogram used for chi2
+    /// (default 10..=110).
     pub fn fit_range(mut self, min: usize, max: usize) -> Self {
-        self.fit_min_bin = min;
-        self.fit_max_bin = max;
+        self.fit_min_bin = Some(min);
+        self.fit_max_bin = Some(max);
         self
     }
 
     pub fn fit_min_bin(mut self, min: usize) -> Self {
-        self.fit_min_bin = min;
+        self.fit_min_bin = Some(min);
         self
     }
 
     pub fn fit_max_bin(mut self, max: usize) -> Self {
-        self.fit_max_bin = max;
+        self.fit_max_bin = Some(max);
+        self
+    }
+
+    /// Fit range `[min, max)` in units of the data (e.g. multiplicity or
+    /// energy) instead of bins, see [`FitConfig::resolve_fit_bins`].
+    pub fn fit_value_range(mut self, min: f64, max: f64) -> Self {
+        self.fit_min = Some(min);
+        self.fit_max = Some(max);
         self
     }
 
     pub fn fit_method(mut self, fit_method: FitMethod) -> Self {
         self.fit_method = fit_method;
-        self
-    }
-
-    pub fn bin_size(mut self, bin_size: f64) -> Self {
-        self.bin_size = bin_size;
         self
     }
 
@@ -356,18 +413,41 @@ impl FitConfigBuilder {
                 self.p.min, self.p.max
             )));
         }
-        if self.fit_min_bin >= self.fit_max_bin {
-            return Err(Error::Config(format!(
-                "fit range: min bin ({}) must be below max bin ({})",
-                self.fit_min_bin, self.fit_max_bin
-            )));
-        }
-        if !(self.bin_size > 0. && self.bin_size.is_finite()) {
-            return Err(Error::Config(format!(
-                "bin size must be positive, got {}",
-                self.bin_size
-            )));
-        }
+        let bins_set = self.fit_min_bin.is_some() || self.fit_max_bin.is_some();
+        let (fit_min_bin, fit_max_bin, fit_values) = match (self.fit_min, self.fit_max) {
+            (None, None) => {
+                let (min, max) = (
+                    self.fit_min_bin.unwrap_or(10),
+                    self.fit_max_bin.unwrap_or(110),
+                );
+                if min >= max {
+                    return Err(Error::Config(format!(
+                        "fit range: min bin ({min}) must be below max bin ({max})"
+                    )));
+                }
+                (min, max, None)
+            }
+            (Some(min), Some(max)) => {
+                if bins_set {
+                    return Err(Error::Config(
+                        "fit range: set either mult_min/mult_max (bins) or fit_min/fit_max \
+                         (values), not both"
+                            .into(),
+                    ));
+                }
+                if !(min.is_finite() && max.is_finite() && min < max) {
+                    return Err(Error::Config(format!(
+                        "fit range: fit_min ({min}) must be below fit_max ({max})"
+                    )));
+                }
+                (0, 0, Some((min, max)))
+            }
+            _ => {
+                return Err(Error::Config(
+                    "fit range: fit_min and fit_max must be set together".into(),
+                ));
+            }
+        };
         let n_threads = self
             .n_threads
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
@@ -385,10 +465,10 @@ impl FitConfigBuilder {
             f: self.f,
             k: self.k,
             p: self.p,
-            fit_min_bin: self.fit_min_bin,
-            fit_max_bin: self.fit_max_bin,
+            fit_min_bin,
+            fit_max_bin,
+            fit_values,
             fit_method: self.fit_method,
-            bin_size: self.bin_size,
             mode: self.mode,
             n_threads,
             distribution: self.distribution,
@@ -436,6 +516,9 @@ pub struct CentralityConfig {
     pub final_file: String,
     /// Number of centrality classes of equal width in percent.
     pub n_classes: usize,
+    /// Multiplicity bins entirely below this value (events without hits) are
+    /// not classified; 0 for a continuous observable such as energy.
+    pub min_value: f64,
     /// Formats of the table files written in addition to stdout.
     pub table_formats: Vec<TableFormat>,
     /// File name, without extension, of the table files in `out_dir`.
@@ -482,6 +565,7 @@ pub struct CentralityConfigBuilder {
     out_dir: PathBuf,
     final_file: String,
     n_classes: usize,
+    min_value: f64,
     table_formats: Vec<TableFormat>,
     table_name: String,
 }
@@ -495,6 +579,7 @@ impl Default for CentralityConfigBuilder {
             out_dir: PathBuf::from("."),
             final_file: "FINAL.root".into(),
             n_classes: 10,
+            min_value: 1.,
             table_formats: Vec::new(),
             table_name: "centrality_table".into(),
         }
@@ -538,6 +623,13 @@ impl CentralityConfigBuilder {
         self
     }
 
+    /// Bins entirely below `min_value` are not classified (default 1: events
+    /// without hits).
+    pub fn min_value(mut self, min_value: f64) -> Self {
+        self.min_value = min_value;
+        self
+    }
+
     pub fn table_formats(mut self, formats: Vec<TableFormat>) -> Self {
         self.table_formats = formats;
         self
@@ -561,6 +653,12 @@ impl CentralityConfigBuilder {
                 self.n_classes
             )));
         }
+        if !self.min_value.is_finite() {
+            return Err(Error::Config(format!(
+                "min_value must be finite, got {}",
+                self.min_value
+            )));
+        }
         if self.final_file.is_empty() || self.table_name.is_empty() {
             return Err(Error::Config(
                 "final_file and table_name must not be empty".into(),
@@ -573,6 +671,7 @@ impl CentralityConfigBuilder {
             out_dir: expand_home(&self.out_dir),
             final_file: self.final_file,
             n_classes: self.n_classes,
+            min_value: self.min_value,
             table_formats: self.table_formats,
             table_name: self.table_name,
         })
@@ -621,6 +720,45 @@ mod tests {
         assert!(base().k_range(0., 1., 0.1).build().is_err());
         assert!(base().f_range(0., 1., 0.).build().is_err());
         assert!(base().n_iter(0).build().is_err());
+    }
+
+    #[test]
+    fn fit_range_in_values() {
+        let axis = |nbins, min, max| oxiroot::prelude::Hist::reg(nbins, min, max).float().xaxis;
+        let bins = |builder: FitConfigBuilder, axis: &TAxis| {
+            let mut c = builder.build().unwrap();
+            c.resolve_fit_bins(axis)
+                .map(|_| (c.fit_min_bin, c.fit_max_bin))
+        };
+        let values = |min, max| base().fit_value_range(min, max);
+        /* unit bins from 0: [10, 110) is bins 11..=110 */
+        let unit = axis(1000, 0., 1000.);
+        assert_eq!(bins(values(10., 110.), &unit).unwrap(), (11, 110));
+        assert_eq!(bins(values(10.5, 110.5), &unit).unwrap(), (11, 111));
+        /* bins of 0.04 GeV: edges and values inside bins */
+        let energy = axis(1000, 0., 40.);
+        assert_eq!(bins(values(0.4, 28.), &energy).unwrap(), (11, 700));
+        assert_eq!(bins(values(0.41, 27.99), &energy).unwrap(), (11, 700));
+        /* clipped to the axis; outside is an error */
+        assert_eq!(bins(values(-5., 2000.), &unit).unwrap(), (1, 1000));
+        assert!(bins(values(1000., 2000.), &unit).is_err());
+        /* bin ranges are unchanged */
+        assert_eq!(bins(base().fit_range(20, 300), &unit).unwrap(), (20, 300));
+
+        assert!(values(5., 5.).build().is_err());
+        assert!(values(5., f64::NAN).build().is_err());
+        assert!(values(1., 5.).fit_min_bin(3).build().is_err());
+        let parse = |s: &str| FitConfigBuilder::from_ron_str(s).and_then(|b| b.build());
+        let c = parse(
+            r#"(fit: (glauber_file: "g", glauber_tree: "t", data_file: "d", data_hist: "h",
+                      fit_min: 0.4, fit_max: 28))"#,
+        )
+        .unwrap();
+        assert_eq!(c.fit_values, Some((0.4, 28.)));
+        assert!(
+            parse(r#"(fit: (glauber_file: "g", glauber_tree: "t", data_file: "d", data_hist: "h", fit_min: 0.4))"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -693,6 +831,7 @@ mod tests {
             PathBuf::from("./centrality_table.C")
         );
         assert_eq!(c.table_formats.len(), 3);
+        assert_eq!(c.min_value, 1.);
 
         let parse = |s: &str| CentralityConfigBuilder::from_ron_str(s).and_then(|b| b.build());
         assert!(parse(r#"(centrality: (data_hist: "h"))"#).is_err());

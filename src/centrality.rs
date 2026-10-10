@@ -37,26 +37,33 @@ pub struct ClassBins {
 /// fractions of the single-event model.
 ///
 /// `single` and `pile_up` are the bin contents (with under- and overflow) of
-/// the single and pile-up event models. As in `HistoCut.C`, bin 1
-/// (multiplicity 0) is not used, and the bins from the first one where the
+/// the single and pile-up event models. The bins before `first_bin` are not
+/// used (see [`first_class_bin`]), and the bins from the first one where the
 /// pile-up events exceed the single events are excluded from the classes;
 /// their single events still count for the most central class. Counting from
 /// the highest multiplicity down, a bin belongs to the class in which its
 /// cumulative fraction (including the bin) falls.
-pub fn class_bins(single: &[f64], pile_up: &[f64], n_classes: usize) -> Result<ClassBins> {
-    if single.len() < 3 || n_classes == 0 {
+pub fn class_bins(
+    single: &[f64],
+    pile_up: &[f64],
+    first_bin: usize,
+    n_classes: usize,
+) -> Result<ClassBins> {
+    let first_bin = first_bin.max(1);
+    if single.len() < first_bin + 2 || n_classes == 0 {
         return Err(Error::Input("empty single-event model histogram".into()));
     }
     let n_bins = single.len() - 2;
-    let pile_up_start = (2..=n_bins).find(|&b| single[b] < pile_up.get(b).copied().unwrap_or(0.));
-    let integral: f64 = single[2..=n_bins].iter().sum();
+    let pile_up_start =
+        (first_bin..=n_bins).find(|&b| single[b] < pile_up.get(b).copied().unwrap_or(0.));
+    let integral: f64 = single[first_bin..=n_bins].iter().sum();
     if !(integral > 0.) {
         return Err(Error::Input("single-event model histogram is empty".into()));
     }
 
     let mut ranges: Vec<Option<(usize, usize)>> = vec![None; n_classes];
     let mut cumulative = 0.;
-    for bin in (2..=n_bins).rev() {
+    for bin in (first_bin..=n_bins).rev() {
         cumulative += single[bin];
         if pile_up_start.is_some_and(|start| bin >= start) {
             continue;
@@ -71,6 +78,25 @@ pub fn class_bins(single: &[f64], pile_up: &[f64], n_classes: usize) -> Result<C
         ranges,
         pile_up_start,
     })
+}
+
+/// First multiplicity bin used for the classes: the first one that is not
+/// entirely below `min_value`. With `min_value` 1, events without hits are
+/// not classified: as in `HistoCut.C`, this is bin 2 for unit bins starting at
+/// 0 or -0.5, while wider bins starting at 0 also hold hits in bin 1, which is
+/// used. With a continuous observable, `min_value` 0 uses all bins from 0.
+pub fn first_class_bin(axis: &TAxis, min_value: f64) -> usize {
+    let n = axis.nbins.max(0) as usize;
+    let width = (axis.xmax - axis.xmin) / n.max(1) as f64;
+    (1..=n)
+        .find(|&bin| bin_edges(axis, bin).1 > min_value + 1e-9 * width)
+        .unwrap_or(n + 1)
+}
+
+/// Shortest decimal form of a class border: an integer, or the value with
+/// the precision of an `f32` (which hides rounding errors of the bin edges).
+fn border(v: f64) -> String {
+    format!("{}", v as f32)
 }
 
 /// Mean and RMS of an observable in a class, and its range for a sharp cut in
@@ -161,8 +187,35 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
         .collect::<Result<Vec<_>>>()?;
 
     check_axes(&single, &pile_up, &fit, &data, &vs_multiplicity)?;
-    let class_bins = class_bins(&single.contents, &pile_up.contents, config.n_classes)?;
     let axis = &single.xaxis;
+    let first_bin = first_class_bin(axis, config.min_value);
+    let (first_lo, first_hi) = bin_edges(axis, first_bin.clamp(1, axis.nbins.max(1) as usize));
+    if config.min_value > 0. && first_lo <= 0. && first_hi > config.min_value {
+        eprintln!(
+            "Warning: multiplicity bin [{}, {}) holds values both below and above \
+             min_value = {}; all its events are counted in the most peripheral class",
+            border(first_lo),
+            border(first_hi),
+            config.min_value
+        );
+    }
+    let n_bins = axis.nbins.max(0) as usize;
+    let total: f64 = single.contents[1..=n_bins].iter().sum();
+    let skipped: f64 = single.contents[1..first_bin.min(n_bins + 1)].iter().sum();
+    if skipped > 0. && total > 0. {
+        println!(
+            "Not classified: multiplicities below {} ({:.2}% of the single events, min_value = {})",
+            border(bin_edges(axis, first_bin - 1).1),
+            100. * skipped / total,
+            config.min_value
+        );
+    }
+    let class_bins = class_bins(
+        &single.contents,
+        &pile_up.contents,
+        first_bin,
+        config.n_classes,
+    )?;
     let width = (axis.xmax - axis.xmin) / axis.nbins as f64;
     let edge = |bin: usize| axis.xmin + (bin - 1) as f64 * width;
     let pile_up_border = class_bins.pile_up_start.map(edge);
@@ -211,12 +264,12 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
 
     /*
      * Ranges of the observables for a sharp cut in each of them, over the
-     * events the class percents refer to (multiplicity bins >= 2): centrality
+     * events the class percents refer to (multiplicity bins >= first_bin): centrality
      * c is the c-quantile of b, and the (1 - c)-quantile of Npart and Ncoll,
      * which decrease with centrality. So b starts at 0 in the most central class.
      */
     for (k, h2) in vs_multiplicity.iter().enumerate() {
-        let all = project_y(h2, "", Some((2, h2.nx() + 1)));
+        let all = project_y(h2, "", Some((first_bin, h2.nx() + 1)));
         let decreasing = k > 0;
         let at = |percent: f64| {
             let q = percent / 100.;
@@ -228,17 +281,6 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
             (s.min, s.max) = (a.min(b), a.max(b));
         }
     }
-    for c in &classes {
-        for border in [c.min_border, c.max_border] {
-            if (border - border.round()).abs() > 1e-6 {
-                eprintln!(
-                    "Warning: multiplicity border {border} is not an integer; \
-                     it is rounded in the Result tree and the tables"
-                );
-            }
-        }
-    }
-
     let result = CentralityResult {
         classes,
         pile_up_border,
@@ -452,6 +494,17 @@ fn write_final(path: &Path, result: &CentralityResult, inputs: &FinalInputs) -> 
     let classes = &result.classes;
 
     let column_f64 = |get: &dyn Fn(&CentralityClass) -> f64| classes.iter().map(get).collect();
+    /* integer borders as Int_t, as read by printFinal.C; otherwise Double_t */
+    let border_branch = |name: &str, get: &dyn Fn(&CentralityClass) -> f64| {
+        if result.integer_borders() {
+            Branch::i32(
+                name,
+                classes.iter().map(|c| get(c).round() as i32).collect(),
+            )
+        } else {
+            Branch::f64(name, column_f64(get))
+        }
+    };
     let mut branches = vec![
         Branch::i32("Ncc", classes.iter().map(|c| c.number as i32).collect()),
         Branch::f32(
@@ -462,20 +515,8 @@ fn write_final(path: &Path, result: &CentralityResult, inputs: &FinalInputs) -> 
             "MaxPercent",
             classes.iter().map(|c| c.max_percent as f32).collect(),
         ),
-        Branch::i32(
-            "MinBorder",
-            classes
-                .iter()
-                .map(|c| c.min_border.round() as i32)
-                .collect(),
-        ),
-        Branch::i32(
-            "MaxBorder",
-            classes
-                .iter()
-                .map(|c| c.max_border.round() as i32)
-                .collect(),
-        ),
+        border_branch("MinBorder", &|c| c.min_border),
+        border_branch("MaxBorder", &|c| c.max_border),
     ];
     for (k, (name, _)) in OBSERVABLES.iter().enumerate() {
         branches.extend([
@@ -570,6 +611,17 @@ fn percent(p: f64) -> String {
 }
 
 impl CentralityResult {
+    /// Whether all class borders are integers, as for a multiplicity with
+    /// unit or integer bin widths. Otherwise (e.g. an energy) the borders are
+    /// written as floating point numbers.
+    pub fn integer_borders(&self) -> bool {
+        self.classes.iter().all(|c| {
+            [c.min_border, c.max_border]
+                .iter()
+                .all(|&b| (b - b.round()).abs() <= 1e-6 * b.abs().max(1.))
+        })
+    }
+
     fn centrality(c: &CentralityClass) -> String {
         format!("{} - {}", percent(c.min_percent), percent(c.max_percent))
     }
@@ -591,11 +643,11 @@ impl CentralityResult {
         for c in &self.classes {
             let _ = writeln!(
                 s,
-                "{:>11} | {:8} | {:8} | {:7.2} | {:7.2} | {:8.2} | {:8.2} | {:7.2} | {:7.2} | \
+                "{:>11} | {:>8} | {:>8} | {:7.2} | {:7.2} | {:8.2} | {:8.2} | {:7.2} | {:7.2} | \
                  {:9.2} | {:9.2} | {:7.2} | {:7.2} | {:9.2} | {:9.2} |",
                 Self::centrality(c),
-                c.min_border.round(),
-                c.max_border.round(),
+                border(c.min_border),
+                border(c.max_border),
                 c.b.mean,
                 c.b.rms,
                 c.b.min,
@@ -639,8 +691,8 @@ impl CentralityResult {
                 s,
                 "\t\\hline\n\t{} & {} & {} & {:.2} & {:.2} & {:.2} & {:.2} & {:.2} & {:.2} \\\\",
                 Self::centrality(c),
-                c.min_border.round(),
-                c.max_border.round(),
+                border(c.min_border),
+                border(c.max_border),
                 c.b.mean,
                 c.b.rms,
                 c.npart.mean,
@@ -667,8 +719,8 @@ impl CentralityResult {
                 s,
                 "{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
                 Self::centrality(c),
-                c.min_border.round(),
-                c.max_border.round(),
+                border(c.min_border),
+                border(c.max_border),
                 c.b.mean,
                 c.b.rms,
                 c.b.min,
@@ -706,16 +758,18 @@ impl CentralityResult {
         let column = |get: &dyn Fn(&CentralityClass) -> f64| {
             self.classes.iter().map(|c| float(get(c))).collect()
         };
-        let int_column = |get: &dyn Fn(&CentralityClass) -> f64| {
-            self.classes
-                .iter()
-                .map(|c| format!("{}", get(c).round() as i64))
-                .collect()
+        let border_type = if self.integer_borders() {
+            "Int_t"
+        } else {
+            "Double_t"
+        };
+        let border_column = |get: &dyn Fn(&CentralityClass) -> f64| {
+            self.classes.iter().map(|c| border(get(c))).collect()
         };
         array("Float_t", "minCentPercent", column(&|c| c.min_percent));
         array("Float_t", "maxCentPercent", column(&|c| c.max_percent));
-        array("Int_t", "minMult", int_column(&|c| c.min_border));
-        array("Int_t", "maxMult", int_column(&|c| c.max_border));
+        array(border_type, "minMult", border_column(&|c| c.min_border));
+        array(border_type, "maxMult", border_column(&|c| c.max_border));
         for (k, (name, _)) in OBSERVABLES.iter().enumerate() {
             array(
                 "Float_t",
@@ -740,7 +794,7 @@ impl CentralityResult {
         }
         let _ = write!(
             s,
-            "\nFloat_t GetCentMult(Int_t mult)\n\
+            "\nFloat_t GetCentMult({border_type} mult)\n\
              // Returns the centrality (middle of the class, in percent) for a given multiplicity, or -1\n\
              {{\n\
              \tInt_t centBin = -1;\n\
@@ -774,7 +828,7 @@ mod tests {
         /* bin 1 (multiplicity 0) is ignored; 100 bins of 1 event */
         let mut values = vec![1000.];
         values.extend([1.; 100]);
-        let bins = class_bins(&contents(&values), &contents(&[0.; 101]), 10).unwrap();
+        let bins = class_bins(&contents(&values), &contents(&[0.; 101]), 2, 10).unwrap();
         assert_eq!(bins.pile_up_start, None);
         /* class 0 holds the 10 highest bins 92..=101, the last class 2..=11 */
         for (i, range) in bins.ranges.iter().enumerate() {
@@ -787,7 +841,7 @@ mod tests {
     fn pile_up_tail_is_excluded_but_counted() {
         let single = contents(&[5., 4., 3., 2., 1., 0.5, 0.5]);
         let pile_up = contents(&[0., 0., 0., 0.1, 0.1, 1., 0.2]);
-        let bins = class_bins(&single, &pile_up, 2).unwrap();
+        let bins = class_bins(&single, &pile_up, 2, 2).unwrap();
         /* from bin 6 on the pile-up exceeds the single events (also bin 7 is excluded) */
         assert_eq!(bins.pile_up_start, Some(6));
         /* integral of bins 2..=7 is 11: class 0 is <= 5.5 from the top: 0.5 + 0.5 + 1 + 2 */
@@ -797,13 +851,39 @@ mod tests {
     #[test]
     fn a_large_bin_leaves_classes_empty() {
         let single = contents(&[0., 1., 8., 1.]);
-        let bins = class_bins(&single, &contents(&[0.; 4]), 5).unwrap();
+        let bins = class_bins(&single, &contents(&[0.; 4]), 2, 5).unwrap();
         /* 10%: bin 4, bin 3 reaches 90% (class 4), classes 1..=3 are empty */
         assert_eq!(
             bins.ranges,
             vec![Some((4, 4)), None, None, None, Some((2, 3))]
         );
-        assert!(class_bins(&contents(&[3., 0.]), &contents(&[0., 0.]), 2).is_err());
+        assert!(class_bins(&contents(&[3., 0.]), &contents(&[0., 0.]), 2, 2).is_err());
+    }
+
+    #[test]
+    fn first_class_bin_skips_only_bins_below_one_hit() {
+        let first = |nbins, lo, hi| first_class_bin(&Hist::reg(nbins, lo, hi).double().xaxis, 1.);
+        /* unit bins: bin 1 is multiplicity 0 */
+        assert_eq!(first(100, 0., 100.), 2);
+        assert_eq!(first(100, -0.5, 99.5), 2);
+        /* wide bins starting at 0: bin 1 also holds hits */
+        assert_eq!(first(20, 0., 100.), 1);
+        assert_eq!(first(20, -0.5, 99.5), 1);
+        /* narrow bins: all bins below 1 */
+        assert_eq!(first(200, 0., 100.), 3);
+        assert_eq!(first(400, 0., 100.), 5);
+        /* histogram above multiplicity 1 */
+        assert_eq!(first(10, 10., 20.), 1);
+        /* continuous observable: all bins from 0, or from a threshold */
+        let axis = Hist::reg(300, 0., 3.).double().xaxis;
+        assert_eq!(first_class_bin(&axis, 0.), 1);
+        assert_eq!(first_class_bin(&axis, 0.25), 26);
+        /* the first bin of the classes is used */
+        let bins = class_bins(&contents(&[1., 1., 1., 1.]), &contents(&[0.; 4]), 1, 4).unwrap();
+        assert_eq!(
+            bins.ranges,
+            vec![Some((4, 4)), Some((3, 3)), Some((2, 2)), Some((1, 1))]
+        );
     }
 
     #[test]
@@ -876,5 +956,29 @@ mod tests {
         );
         assert!(tex.trim_end().ends_with("\\end{document}"));
         assert_eq!(result.plain_table().lines().count(), 5);
+        assert!(result.integer_borders());
+    }
+
+    #[test]
+    fn non_integer_borders_are_not_rounded() {
+        let result = CentralityResult {
+            classes: vec![class(1, (2.49, 7.640000000000001)), class(2, (0., 2.49))],
+            pile_up_border: None,
+            source: "qa.root".into(),
+        };
+        assert!(!result.integer_borders());
+        assert!(
+            result
+                .csv_table()
+                .lines()
+                .nth(2)
+                .unwrap()
+                .starts_with("0 - 50,2.49,7.64,")
+        );
+        let cpp = result.cpp_table();
+        assert!(cpp.contains("Double_t minMult [2] = { 2.49, 0 };"), "{cpp}");
+        assert!(cpp.contains("Float_t GetCentMult(Double_t mult)"), "{cpp}");
+        assert!(result.tex_table().contains("\t0 - 50 & 2.49 & 7.64 &"));
+        assert!(result.plain_table().contains("|     2.49 |     7.64 |"));
     }
 }

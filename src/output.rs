@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use oxiroot::prelude::*;
 
-use crate::config::FitConfig;
+use crate::config::{Distribution, FitConfig};
 use crate::error::Result;
 use crate::fitter::{FitResult, ModelHistograms, ScanPoint};
 
@@ -19,7 +19,7 @@ pub fn scan_file_path(config: &FitConfig) -> PathBuf {
 
 /// Writes all scanned (f, k, p) points with their optimal `mu` into the tree
 /// `test_tree` (branches `f`, `mu`, `k`, `p`, `chi2`, `chi2_error`, `sigma`).
-pub fn write_scan(path: &Path, scan: &[ScanPoint]) -> Result<()> {
+pub fn write_scan(path: &Path, scan: &[ScanPoint], distribution: Distribution) -> Result<()> {
     let column = |get: fn(&ScanPoint) -> f32| scan.iter().map(get).collect::<Vec<_>>();
     let tree = Tree::new(
         "test_tree",
@@ -30,7 +30,10 @@ pub fn write_scan(path: &Path, scan: &[ScanPoint]) -> Result<()> {
             Branch::f32("p", column(|s| s.params.p)),
             Branch::f32("chi2", column(|s| s.chi2)),
             Branch::f32("chi2_error", column(|s| s.chi2_error)),
-            Branch::f32("sigma", column(|s| s.params.sigma())),
+            Branch::f32(
+                "sigma",
+                scan.iter().map(|s| s.params.sigma(distribution)).collect(),
+            ),
         ],
     );
     FileWriter::create(path)

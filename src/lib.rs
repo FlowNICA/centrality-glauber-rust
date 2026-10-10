@@ -45,7 +45,7 @@ pub fn run_with_progress(
     let result = fitter.fit_with_progress(progress)?;
 
     let scan_path = output::scan_file_path(fitter.config());
-    output::write_scan(&scan_path, &result.scan)?;
+    output::write_scan(&scan_path, &result.scan, fitter.config().distribution)?;
 
     let model = fitter.model_histograms(&result.best);
     let nbd = fitter.nbd_histogram(&result.best);

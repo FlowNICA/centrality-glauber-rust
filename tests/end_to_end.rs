@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use centrality_glauber_rust::Distribution as MultDistribution;
-use centrality_glauber_rust::{FitConfig, FitMethod, Mode};
+use centrality_glauber_rust::{FitConfig, FitMethod, FitResult, Mode};
 use oxiroot::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -10,6 +10,9 @@ use rand_distr::{Distribution, Gamma, Poisson};
 const TRUE_F: f32 = 0.5;
 const TRUE_MU: f64 = 0.8;
 const TRUE_K: f64 = 1.5;
+/// Mean energy (GeV) and k of one ancestor in [`write_energy_data`].
+const TRUE_E_MU: f64 = 0.05;
+const TRUE_E_K: f64 = 4.;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -348,34 +351,32 @@ fn gamma_and_nbd_agree_for_integer_k() {
 }
 
 #[test]
-fn bin_size_does_not_change_the_fit() {
-    let dir = temp_dir("bin-size");
+fn npart_ncoll_histograms_have_unit_bins() {
+    let dir = temp_dir("range-histos");
     let (glauber, data) = write_inputs(&dir, 50_000, false);
-    let fit = |bin_size| {
-        let config = FitConfig::builder()
-            .glauber(&glauber, "nt_toy")
-            .data(&data, "hMult")
-            .mode(Mode::Default)
-            .f_range(TRUE_F, TRUE_F, 0.)
-            .k_range(1.0, 2.0, 0.5)
-            .p_range(0., 0.02, 0.01)
-            .fit_range(20, 300)
-            .n_iter(5)
-            .n_threads(4)
-            .bin_size(bin_size)
-            .seed(3)
-            .build()
-            .unwrap();
-        let fitter = centrality_glauber_rust::Fitter::new(config).unwrap();
-        let h = fitter.npart_histo();
+    let config = FitConfig::builder()
+        .glauber(&glauber, "nt_toy")
+        .data(&data, "hMult")
+        .fit_range(20, 300)
+        .build()
+        .unwrap();
+    let fitter = centrality_glauber_rust::Fitter::new(config).unwrap();
+    /* integer Npart and Ncoll: unit bins from 0, the maximum not in the overflow */
+    for h in [fitter.npart_histo(), fitter.ncoll_histo()] {
         let nbins = h.xaxis.nbins as usize;
-        assert!(((h.xaxis.xmax / nbins as f64) - bin_size).abs() < 1e-9);
-        assert_eq!(h.contents[nbins + 1], 0., "Npart maximum in the overflow");
-        fitter.fit().unwrap()
-    };
-    let reference = fit(1.);
-    for bin_size in [0.1, 0.3, 2., 3., 7.] {
-        assert_eq!(fit(bin_size), reference, "bin_size {bin_size}");
+        assert_eq!(
+            (h.xaxis.xmin, h.xaxis.xmax),
+            (0., nbins as f64),
+            "{}",
+            h.name
+        );
+        assert_eq!(
+            h.contents[nbins + 1],
+            0.,
+            "{}: maximum in the overflow",
+            h.name
+        );
+        assert_eq!(h.contents[0], 0., "{}", h.name);
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -547,5 +548,215 @@ fn centrality_classes_from_the_fit() {
     let cpp = std::fs::read_to_string(config.table_path(TableFormat::Cpp)).unwrap();
     assert!(cpp.contains("Int_t minMult [10]") && cpp.contains("GetCentMult"));
     assert!(config.table_path(TableFormat::Tex).exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Copy of `h` with `w` neighboring bins merged.
+fn rebin(h: &TH1, w: usize) -> TH1 {
+    let nbins = h.xaxis.nbins as usize / w;
+    let width = (h.xaxis.xmax - h.xaxis.xmin) / h.xaxis.nbins as f64 * w as f64;
+    let mut r = Hist::reg(
+        nbins as i32,
+        h.xaxis.xmin,
+        h.xaxis.xmin + width * nbins as f64,
+    )
+    .name(h.name.clone())
+    .float();
+    r.sumw2 = vec![0.; nbins + 2];
+    for bin in 1..=nbins * w {
+        let merged = (bin - 1) / w + 1;
+        r.contents[merged] += h.contents[bin];
+        r.sumw2[merged] += h.contents[bin];
+    }
+    r
+}
+
+#[test]
+fn wide_data_bins() {
+    use centrality_glauber_rust::CentralityConfig;
+    use centrality_glauber_rust::centrality;
+
+    let dir = temp_dir("wide-bins");
+    let (glauber, data) = write_inputs(&dir, 50_000, false);
+    let unit = TH1::read_root(&FileReader::open(&data).unwrap(), "hMult").unwrap();
+    let data = dir.join("data2.root");
+    rebin(&unit, 2)
+        .write_root(&data, Compression::None)
+        .unwrap();
+    let out_dir = dir.join("out");
+
+    /* multiplicities 20..300 as with unit bins */
+    let config = FitConfig::builder()
+        .glauber(&glauber, "nt_toy")
+        .data(&data, "hMult")
+        .out_dir(&out_dir)
+        .mode(Mode::Default)
+        .f_range(TRUE_F, TRUE_F, 0.)
+        .k_range(TRUE_K as f32, TRUE_K as f32, 0.)
+        .p_range(0., 0., 0.)
+        .fit_range(10, 150)
+        .n_iter(15)
+        .seed(42)
+        .build()
+        .unwrap();
+    let result = centrality_glauber_rust::run(config).unwrap();
+    assert!(
+        (result.best.mu as f64 - TRUE_MU).abs() < 0.05,
+        "mu = {}",
+        result.best.mu
+    );
+    assert!(result.chi2 < 3., "chi2/ndf = {}", result.chi2);
+
+    let qa_file = out_dir.join(centrality_glauber_rust::output::QA_FILE_NAME);
+    let qa = FileReader::open(&qa_file).unwrap();
+    let single = TH1::read_root(&qa, "glaub_sng_histo").unwrap();
+    assert_eq!(
+        (
+            single.xaxis.xmin,
+            single.xaxis.xmax / single.xaxis.nbins as f64
+        ),
+        (0., 2.)
+    );
+
+    /* bin 1, multiplicities [0, 2), holds hits: it is in the most peripheral class */
+    let config = CentralityConfig::builder()
+        .qa_file(&qa_file)
+        .data(None, "hMult")
+        .out_dir(&out_dir)
+        .n_classes(5)
+        .table_formats(vec![])
+        .build()
+        .unwrap();
+    let classes = centrality::run(&config).unwrap().classes;
+    assert_eq!(classes.len(), 5);
+    assert_eq!((classes[4].bins.0, classes[4].min_border), (1, 0.));
+    let n_bins = single.xaxis.nbins as usize;
+    let integral: f64 = single.contents[1..=n_bins].iter().sum();
+    let max_bin = single.contents[1..=n_bins]
+        .iter()
+        .cloned()
+        .fold(0., f64::max)
+        / integral;
+    for (i, c) in classes.iter().enumerate() {
+        let hi = if i == 0 { n_bins } else { c.bins.1 };
+        let fraction: f64 = single.contents[c.bins.0..=hi].iter().sum::<f64>() / integral;
+        assert!(
+            (fraction - 0.2).abs() <= max_bin + 1e-9,
+            "class {}: fraction {fraction}",
+            c.label()
+        );
+        assert_eq!(c.min_border % 2., 0.);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Data histogram `hEnergy` of a continuous observable ("energy") from the
+/// Glauber tree written by [`write_inputs`]: each ancestor deposits a
+/// Gamma distributed energy with mean `TRUE_E_MU` GeV and variance
+/// `TRUE_E_MU^2 / TRUE_E_K`, in units of `unit` GeV (1000 for MeV).
+fn write_energy_data(dir: &std::path::Path, glauber: &std::path::Path, unit: f64) -> PathBuf {
+    let file = FileReader::open(glauber).unwrap();
+    let tree = TreeReader::open(&file, "nt_toy").unwrap();
+    let npart = tree.read_branch(&file, "Npart").unwrap();
+    let ncoll = tree.read_branch(&file, "Ncoll").unwrap();
+    let (npart, ncoll) = (npart.as_f32().unwrap(), ncoll.as_f32().unwrap());
+
+    let gamma = Gamma::new(TRUE_E_K, TRUE_E_MU / TRUE_E_K).unwrap();
+    let mut data = Hist::reg(1000, 0., 40. * unit).name("hEnergy").float();
+    let mut rng = SmallRng::seed_from_u64(3);
+    for i in 0..50_000 {
+        let j = (i * 7919) % npart.len();
+        let na = Mode::Default.n_ancestors(TRUE_F as f64, npart[j] as f64, ncoll[j] as f64) as i64;
+        let energy: f64 = (0..na).map(|_| gamma.sample(&mut rng)).sum();
+        data.fill(energy * unit);
+    }
+    let path = dir.join(format!("energy_{unit}.root"));
+    data.write_root(&path, Compression::None).unwrap();
+    path
+}
+
+#[test]
+fn energy_fit_does_not_depend_on_units() {
+    use centrality_glauber_rust::centrality;
+    use centrality_glauber_rust::{CentralityConfig, CentralityResult};
+
+    let dir = temp_dir("energy");
+    let (glauber, _) = write_inputs(&dir, 1, false);
+    let fit = |unit: f64| -> (FitResult, CentralityResult) {
+        let data = write_energy_data(&dir, &glauber, unit);
+        let out_dir = dir.join(format!("out_{unit}"));
+        let config = FitConfig::builder()
+            .glauber(&glauber, "nt_toy")
+            .data(&data, "hEnergy")
+            .out_dir(&out_dir)
+            .mode(Mode::Default)
+            .distribution(MultDistribution::GammaScaleFree)
+            .f_range(TRUE_F, TRUE_F, 0.)
+            .k_range(2., 6., 1.)
+            .p_range(0., 0., 0.)
+            /* 0.4..28 GeV: bins 11..=700 */
+            .fit_value_range(0.4 * unit, 28. * unit)
+            .n_iter(15)
+            .seed(42)
+            .build()
+            .unwrap();
+        let result = centrality_glauber_rust::run(config).unwrap();
+        let config = CentralityConfig::builder()
+            .qa_file(out_dir.join(centrality_glauber_rust::output::QA_FILE_NAME))
+            .data(None, "hEnergy")
+            .out_dir(&out_dir)
+            .n_classes(10)
+            .min_value(0.)
+            .table_formats(vec![])
+            .build()
+            .unwrap();
+        (result, centrality::run(&config).unwrap())
+    };
+    let fit_file = |unit: f64| {
+        dir.join(format!("out_{unit}"))
+            .join("fit_0.50_2.00_6.00_0.00_11.root")
+    };
+    let (gev, gev_classes) = fit(1.);
+    let (mev, mev_classes) = fit(1000.);
+    println!("GeV: {gev:?}\nMeV: {mev:?}");
+    print!("{}{}", gev_classes.plain_table(), mev_classes.plain_table());
+
+    /* the toy constrains mu to a few percent; the chi2 is flat in k within errors */
+    assert!(
+        (gev.best.mu as f64 / TRUE_E_MU - 1.).abs() < 0.08,
+        "mu = {}",
+        gev.best.mu
+    );
+    assert!(gev.chi2 < 3., "chi2/ndf = {}", gev.chi2);
+    /* the same fit in MeV: mu scales with the unit, k does not */
+    assert!(
+        (mev.best.mu as f64 / (1000. * gev.best.mu as f64) - 1.).abs() < 1e-3,
+        "mu = {} MeV vs {} GeV",
+        mev.best.mu,
+        gev.best.mu
+    );
+    assert_eq!(mev.best.k, gev.best.k);
+    /* the fit range in values gives the same bins in both units */
+    assert!(fit_file(1.).exists() && fit_file(1000.).exists());
+    assert!((mev.chi2 / gev.chi2 - 1.).abs() < 1e-2);
+
+    /* the same classes: borders scale with the unit, not rounded to integers */
+    assert_eq!(gev_classes.classes.len(), 10);
+    assert_eq!(mev_classes.classes.len(), 10);
+    assert!(!gev_classes.integer_borders());
+    assert_eq!(gev_classes.classes[9].min_border, 0.);
+    for (g, m) in gev_classes.classes.iter().zip(&mev_classes.classes) {
+        assert!((m.min_border - 1000. * g.min_border).abs() < 1e-6 * m.max_border);
+        assert!((m.npart.mean - g.npart.mean).abs() < 0.01 * g.npart.mean);
+    }
+    /* most central class: large Npart, narrow compared with all events */
+    let central = &gev_classes.classes[0];
+    assert!(central.npart.mean > 100. && central.npart.rms < 0.3 * central.npart.mean);
+
+    let fin = FileReader::open(dir.join("out_1").join("FINAL.root")).unwrap();
+    let tree = TreeReader::open(&fin, "Result").unwrap();
+    let borders = tree.read_branch(&fin, "MinBorder").unwrap();
+    let borders = borders.as_f64().unwrap();
+    assert_eq!(borders[0], gev_classes.classes[0].min_border);
     std::fs::remove_dir_all(&dir).unwrap();
 }

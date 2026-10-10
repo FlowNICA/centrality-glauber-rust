@@ -36,8 +36,8 @@ pub struct FitParams {
 
 impl FitParams {
     /// Variance of the per-ancestor multiplicity.
-    pub fn sigma(&self) -> f32 {
-        (self.mu / self.k + 1.) * self.mu
+    pub fn sigma(&self, distribution: Distribution) -> f32 {
+        distribution.variance(self.mu as f64, self.k as f64) as f32
     }
 }
 
@@ -159,11 +159,12 @@ pub struct Fitter {
 
 impl Fitter {
     /// Reads the data histogram and the Glauber tree given in `config`.
-    pub fn new(config: FitConfig) -> Result<Self> {
+    pub fn new(mut config: FitConfig) -> Result<Self> {
         let data_file = FileReader::open(&config.data_file).map_err(|e| {
             Error::Input(format!("cannot open {}: {e}", config.data_file.display()))
         })?;
         let data = TH1::read_root(&data_file, &config.data_hist)?;
+        config.resolve_fit_bins(&data.xaxis)?;
         let n_events = required_n_events(&data, &config)?;
         let events =
             GlauberEvents::load(&config.glauber_file, &config.glauber_tree, Some(n_events))?;
@@ -171,12 +172,13 @@ impl Fitter {
     }
 
     /// Creates the fitter from already loaded inputs.
-    pub fn with_inputs(config: FitConfig, data: TH1, events: GlauberEvents) -> Result<Self> {
+    pub fn with_inputs(mut config: FitConfig, data: TH1, events: GlauberEvents) -> Result<Self> {
         if !data.xaxis.xbins.is_empty() {
             return Err(Error::Input(
                 "data histogram must have uniform binning".into(),
             ));
         }
+        config.resolve_fit_bins(&data.xaxis)?;
         let n_events = required_n_events(&data, &config)?;
         if events.len() < n_events {
             return Err(Error::Input(format!(
@@ -214,14 +216,14 @@ impl Fitter {
             "fNpartHisto",
             "Npart",
             events.npart_max,
-            config.bin_size,
+            range_bin_width(&events.npart[..n_events], events.npart_max),
             &events.npart[..n_events],
         )?;
         let ncoll_histo = range_histo(
             "fNcollHisto",
             "Ncoll",
             events.ncoll_max,
-            config.bin_size,
+            range_bin_width(&events.ncoll[..n_events], events.ncoll_max),
             &events.ncoll[..n_events],
         )?;
 
@@ -231,6 +233,14 @@ impl Fitter {
         let seed = config.seed.unwrap_or_else(rand::random);
 
         println!("Glauber events used: {n_events}");
+        let edge = |bin: usize| min + width * (bin as f64 - 1.);
+        println!(
+            "Fit range: bins {}..={} ([{}, {}))",
+            config.fit_min_bin,
+            config.fit_max_bin,
+            edge(config.fit_min_bin) as f32,
+            edge(config.fit_max_bin + 1) as f32
+        );
         println!("Last data bin (fNbins): {n_bins}");
         println!("Maximum multiplicity (fMaxValue): {max_value}");
         println!("Threads: {}", config.n_threads);
@@ -284,7 +294,7 @@ impl Fitter {
     /// Same as [`Fitter::fit`], reporting the progress to `progress`.
     pub fn fit_with_progress(&self, progress: &(dyn Fn(FitProgress) + Sync)) -> Result<FitResult> {
         let mode = self.config.mode;
-        /* int(TTree::GetMaximum) as in the original; independent of bin_size */
+        /* int(TTree::GetMaximum) as in the original */
         let npart_max = self.events.npart_max.trunc() as f64;
         let ncoll_max = self.events.ncoll_max.trunc() as f64;
 
@@ -528,9 +538,22 @@ impl Fitter {
 
     /// Distribution of the multiplicity from a single ancestor (Gamma or NBD,
     /// as used in the fit).
+    /// NBD values are integers and get unit bins; the continuous Gamma values
+    /// get 100 bins up to 6 standard deviations above the mean, whatever the
+    /// scale of the observable.
     pub fn nbd_histogram(&self, params: &FitParams) -> TH1 {
-        let nbins = ((params.mu as f64 + 1.) * 3.).max(10.) as i32;
-        let mut h = Hist::reg(nbins, 0., nbins as f64)
+        let mu = params.mu as f64;
+        let (nbins, max) = match self.config.distribution {
+            Distribution::Nbd => {
+                let nbins = ((mu + 1.) * 3.).max(10.) as i32;
+                (nbins, nbins as f64)
+            }
+            Distribution::Gamma | Distribution::GammaScaleFree => {
+                let max = mu + 6. * (params.sigma(self.config.distribution) as f64).sqrt();
+                (100, if max > 0. && max.is_finite() { max } else { 1. })
+            }
+        };
+        let mut h = Hist::reg(nbins, 0., max)
             .name(self.config.distribution.histogram_name())
             .float();
         let sampler = Sampler::new(
@@ -779,6 +802,16 @@ fn required_n_events(data: &TH1, config: &FitConfig) -> Result<usize> {
     Ok(n)
 }
 
+/// Bin width of the `Npart` and `Ncoll` QA histograms: 1 for integer values
+/// (as from an MC-Glauber), otherwise 1/1000 of the maximum.
+fn range_bin_width(values: &[f32], max: f32) -> f64 {
+    if values.iter().all(|v| v.fract() == 0.) || !(max > 0.) {
+        1.
+    } else {
+        max as f64 / 1000.
+    }
+}
+
 /// Histogram with bins of exactly `width` starting at 0, with as many bins as
 /// needed to include `max` (the upper edge is exclusive, so a value equal to
 /// `max` must not fall into the overflow).
@@ -787,7 +820,7 @@ fn range_histo(name: &str, title: &str, max: f32, width: f64, values: &[f32]) ->
     let n = (max.max(0.) as f64 / width + 1e-6).floor() + 1.;
     if n > MAX_RANGE_BINS as f64 {
         return Err(Error::Config(format!(
-            "bin_size {width} gives {n} bins for {title} up to {max}, maximum is {MAX_RANGE_BINS}"
+            "bin width {width} gives {n} bins for {title} up to {max}, maximum is {MAX_RANGE_BINS}"
         )));
     }
     let nbins = n as usize;
@@ -852,7 +885,8 @@ impl ModelAxis {
 }
 
 /// Multiplicity per ancestor with mean `mu` and variance `mu (1 + mu / k)`:
-/// Gamma distributed, or NBD distributed (integer) with [`Distribution::Nbd`].
+/// Gamma distributed, or NBD distributed (integer) with [`Distribution::Nbd`];
+/// Gamma with variance `mu^2 / k` with [`Distribution::GammaScaleFree`].
 #[derive(Debug, Clone, Copy)]
 struct Sampler {
     mode: Mode,
@@ -873,8 +907,14 @@ impl Sampler {
             distribution,
             mu,
             k,
-            alpha: mu * k / (mu + k),
-            theta: (k + mu) / k,
+            alpha: match distribution {
+                Distribution::GammaScaleFree => k,
+                _ => mu * k / (mu + k),
+            },
+            theta: match distribution {
+                Distribution::GammaScaleFree => mu / k,
+                _ => (k + mu) / k,
+            },
         }
     }
 
@@ -892,7 +932,7 @@ impl Sampler {
             return 0.;
         }
         match self.distribution {
-            Distribution::Gamma => {
+            Distribution::Gamma | Distribution::GammaScaleFree => {
                 if !(self.alpha > 0.) || !(self.theta > 0.) {
                     return 0.;
                 }
@@ -982,7 +1022,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn range_histo_bins_have_exactly_bin_size() {
+    fn range_bin_width_from_values() {
+        assert_eq!(range_bin_width(&[2., 17., 394.], 394.), 1.);
+        assert_eq!(range_bin_width(&[2., 17.5, 400.], 400.), 0.4);
+        assert_eq!(range_bin_width(&[], 0.), 1.);
+    }
+
+    #[test]
+    fn range_histo_bins_have_exactly_the_width() {
         /* integer values 0..=394 as in a Glauber tree */
         let values: Vec<f32> = (0..=394).map(|v| v as f32).collect();
         for tenths in [1u32, 3, 5, 7, 10, 20, 30, 70, 10_000] {
@@ -1059,6 +1106,17 @@ mod tests {
             (var / (32. * (1. + 0.8 / 1.5)) - 1.).abs() < 0.03,
             "var {var}"
         );
+    }
+
+    #[test]
+    fn scale_free_gamma_moments() {
+        /* sum of na Gamma(k, mu / k): mean na mu, variance na mu^2 / k, also for small mu */
+        for (mu, k, na) in [(0.008, 1.5, 40), (50., 4., 7)] {
+            let (mean, var, _) = moments(Distribution::GammaScaleFree, mu, k, na);
+            let (exp_mean, exp_var) = (na as f64 * mu, na as f64 * mu * mu / k);
+            assert!((mean / exp_mean - 1.).abs() < 0.01, "{mu} {k}: mean {mean}");
+            assert!((var / exp_var - 1.).abs() < 0.03, "{mu} {k}: var {var}");
+        }
     }
 
     #[test]

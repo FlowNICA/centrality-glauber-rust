@@ -16,8 +16,7 @@ use crate::error::Error;
 /// | `NcollFast` | Ncoll^f / 100^f            |
 /// | `STAR`      | (1-f)*Npart/2 + f*Ncoll    |
 /// | `HADES`     | (1 - f*Npart^2)*Npart      |
-/// | 'TOF'       | f + Npart                  |
-/// | 'TOF2'      | f + Npart^2                |
+/// | `TOF`       | f + Npart                  |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(try_from = "String")]
 pub enum Mode {

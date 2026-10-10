@@ -28,14 +28,15 @@
         // Fit range (bins of the data histogram)
         mult_min: 10,
         mult_max: 110,
+        // ... or the fit range [fit_min, fit_max) in the units of the data (instead of
+        // mult_min/mult_max), e.g. for an energy: the bins covering it are used
+        // fit_min: 0.4,
+        // fit_max: 28.0,
 
         // Statistic minimized to find the optimal parameters:
         //   Chi2       - minimum chi2 (as in the original framework)
         //   Likelihood - maximum Poisson likelihood, via -2 ln(L / L_saturated)
         fit_method: Likelihood,
-
-        // Bin size of the Npart/Ncoll histograms
-        bin_size: 1.0,
 
         // Mode for the number of ancestors calculation
         //  |   mode    |   function for Na       |
@@ -54,8 +55,10 @@
 
         // Distribution of the multiplicity per ancestor (mean mu, variance mu*(1 + mu/k)),
         // used in the fit and for the per-ancestor output histogram:
-        //   Gamma - continuous Gamma distribution ("gamma" histogram)
-        //   Nbd   - negative binomial distribution, integer values ("nbd" histogram)
+        //   Gamma          - continuous Gamma distribution ("gamma" histogram)
+        //   Nbd            - negative binomial distribution, integer values ("nbd" histogram)
+        //   GammaScaleFree - Gamma with variance mu^2/k, for continuous observables such as
+        //                    energy: the fit does not depend on their units ("gamma_scale_free")
         distribution: Nbd,
 
         // Random seed for reproducible results; omit for a random seed
@@ -79,6 +82,10 @@
 
         // Number of centrality classes of equal width in percent
         n_classes: 10,
+
+        // Multiplicity bins entirely below min_value are not classified: 1 skips
+        // events without hits; 0 for a continuous observable such as energy
+        min_value: 1.0,
 
         // Table files written to out_dir in addition to the table on stdout:
         //   Tex - LaTeX document (<table_name>.tex)
