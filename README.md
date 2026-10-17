@@ -180,7 +180,9 @@ Both files are written to `out_dir`:
   - `gamma` (or `nbd`, `gamma_scale_free`): the multiplicity from a single
     ancestor, in 100 bins up to 6 standard deviations above `mu` (unit bins for
     `nbd`);
-  - tree `BestResult`: `mu`, `f`, `k`, `p`, `chi2` and `chi2_error` of the best fit.
+  - tree `BestResult`: `mu`, `f`, `k`, `p`, `chi2` and `chi2_error` of the best
+    fit, and the fit settings `mode`, `distribution` and `fit_method` as
+    strings (used for the header of the `define-centrality` picture).
 
 ### Centrality classes
 
@@ -199,29 +201,40 @@ cargo run --release --bin define-centrality -- config.ron
         // data_file: "~/data.root",        // default: qa_file
         out_dir: ".",
         final_file: "FINAL.root",
-        n_classes: 10,                      // classes of equal width in percent
+        n_classes: 10,                      // classes of equal width in percent, or
+        // classes: [0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 100],   // class edges in percent
         min_value: 1.0,                     // bins below are not classified; 0 for energy
         table_formats: [Csv],               // any of Tex, Csv, Cpp
         table_name: "centrality_table",     // <table_name>.tex/.csv/.C in out_dir
+        plot_file: "centrality_result.png", // PNG picture in out_dir; None: no picture
+        // plot_title: "BM@N Run8, Xe+CsI", // first line of the picture's header
     ),
 ```
 
-Only `qa_file` and `data_hist` are required.
+Only `qa_file` and `data_hist` are required. The classes are either
+`n_classes` classes of equal width (default 10), or set by their edges in
+percent with `classes`, as in
+[centrality-inverse-bayes-rust](https://github.com/FlowNICA/centrality-inverse-bayes-rust).
+The edges must increase within [0, 100]; setting both `classes` and `n_classes`
+is an error. They do not have to cover 0–100%: with `classes: [10, 20, 40, 60]`
+the 10% highest and the 40% lowest multiplicities are in no class (and the
+plot draws the outer borders), while the percents still refer to all
+classified events from `min_value` on.
 
 How it works:
 
 1. **Class borders.** The classes are defined with the single-event model
    `glaub_sng_histo`. Starting from the highest multiplicity and going down,
    each bin goes to the class that its cumulative fraction (including the bin)
-   falls in, so each class holds `1/n_classes` of the single events. Bins that
-   lie entirely below `min_value` are not used. The default 1 skips events
-   without hits, e.g. bin 1 for unit bins from 0. For a continuous observable
-   such as energy, set `min_value: 0` to use all bins, or set it to a
-   threshold. The fraction of skipped events is printed. Any bin width works:
-   with wider bins starting at 0, bin 1 also holds events with hits, so it is
-   used, and its events without hits count toward the most peripheral class (a
-   warning is printed). The pile-up dominated tail is not assigned to any
-   class; it starts at the first bin where `glaub_plp_histo` exceeds
+   falls in, so each class holds its percent range of the single events. Bins
+   that lie entirely below `min_value` are not used. The default 1 skips
+   events without hits, e.g. bin 1 for unit bins from 0. For a continuous
+   observable such as energy, set `min_value: 0` to use all bins, or set it to
+   a threshold. The fraction of skipped events is printed. Any bin width
+   works: with wider bins starting at 0, bin 1 also holds events with hits, so
+   it is used, and its events without hits count toward the most peripheral
+   class (a warning is printed). The pile-up dominated tail is not assigned to
+   any class; it starts at the first bin where `glaub_plp_histo` exceeds
    `glaub_sng_histo`. Its single events still count toward the most central
    class. A class covers multiplicities `[MinBorder, MaxBorder)`, and each
    class starts exactly where the previous one ends.
@@ -249,13 +262,25 @@ The table is always printed to stdout. `FINAL.root` in `out_dir` contains:
   e.g. for an energy, they are `Double_t`, and the tables print them unrounded
   (`minMult`/`maxMult` and `GetCentMult` in the `.C` table then use `Double_t`);
 - `B/Npart/Ncoll_average_VS_Centrality`: the averages versus centrality, with
-  the RMS as bin errors. The original `printFinal.C` can read this file;
+  the RMS as bin errors (with variable bins at the `classes` edges). The original `printFinal.C` can read this file;
 - `B/Npart/Ncoll_VS_CentralityClass <min>%-<max>%`: the distributions in each
   class, plus `... 0%-100%` for all events;
 - `CentralityClass_Fit <min>%-<max>%` and `CentralityClass <min>%-<max>%`: the
   model and data multiplicity in each class;
 - `Centrality_vs_Multiplicity`: the upper percent of the class of each
   multiplicity bin.
+
+`plot_file` (in `out_dir`) is a PNG picture of the result, in the style of the
+ROOT canvases of the C++ framework (and of
+[centrality-inverse-bayes-rust](https://github.com/FlowNICA/centrality-inverse-bayes-rust)):
+the data and the best fit (`glaub_fit_histo`) on a logarithmic scale, with the
+class borders and labels, and the ratio data / fit below. The header shows
+`plot_title`, `Na` and the per-ancestor distribution as formulas, and the fitted
+parameters with χ²/ndf (or −2lnλ/ndf). QA files from older versions have no
+fit settings, so only the parameters are shown. The picture is drawn in pure
+Rust ([plotters](https://crates.io/crates/plotters)) with the embedded
+Liberation Sans font (`data/fonts`, SIL Open Font License), so no system
+libraries are needed.
 
 ## Library use
 
@@ -306,8 +331,8 @@ executable, read it with `config_file::read_section::<YourConfig>(path, "name")`
 - `distribution: GammaScaleFree` is new: the C++ fit only has the
   `mu·(1 + mu/k)` Gamma, whose result depends on the units of a continuous
   observable (see [Model](#model)).
-- `define-centrality` fixes several bugs in the macros it replaces, and it
-  writes no canvases or PDFs:
+- `define-centrality` fixes several bugs in the macros it replaces. Instead of
+  ROOT canvases and PDFs, it draws one PNG picture (`plot_file`):
   - `HistoCut.C` assigns bins with a running sum that it resets to 0 at each
     class boundary. The boundary bin's events are therefore never counted, and
     the bin at the start of the most peripheral class belongs to no class. Its

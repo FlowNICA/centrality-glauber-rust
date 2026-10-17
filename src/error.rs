@@ -15,6 +15,9 @@ pub enum Error {
     /// The input data (Glauber tree or data histogram) cannot be used.
     #[error("invalid input: {0}")]
     Input(String),
+    /// Drawing the PNG picture failed.
+    #[error("plot error: {0}")]
+    Plot(String),
     /// The worker thread pool could not be created.
     #[error("thread pool error: {0}")]
     ThreadPool(#[from] rayon::ThreadPoolBuildError),

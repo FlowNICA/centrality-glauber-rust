@@ -514,8 +514,10 @@ pub struct CentralityConfig {
     pub out_dir: PathBuf,
     /// Name of the output ROOT file in `out_dir`.
     pub final_file: String,
-    /// Number of centrality classes of equal width in percent.
-    pub n_classes: usize,
+    /// Class edges in percent, increasing within [0, 100], e.g.
+    /// `[0, 5, 10, 20, ..., 100]`: from `classes`, or `n_classes` classes of
+    /// equal width.
+    pub class_edges: Vec<f64>,
     /// Multiplicity bins entirely below this value (events without hits) are
     /// not classified; 0 for a continuous observable such as energy.
     pub min_value: f64,
@@ -523,6 +525,11 @@ pub struct CentralityConfig {
     pub table_formats: Vec<TableFormat>,
     /// File name, without extension, of the table files in `out_dir`.
     pub table_name: String,
+    /// PNG picture of the data, the fit, data / fit and the class borders in
+    /// `out_dir`; `None` for no picture.
+    pub plot_file: Option<String>,
+    /// Title starting the header of the picture, e.g. experiment and system.
+    pub plot_title: Option<String>,
 }
 
 impl CentralityConfig {
@@ -546,6 +553,16 @@ impl CentralityConfig {
         self.out_dir.join(&self.final_file)
     }
 
+    /// Number of centrality classes.
+    pub fn n_classes(&self) -> usize {
+        self.class_edges.len() - 1
+    }
+
+    /// Path of the PNG picture, if any.
+    pub fn plot_path(&self) -> Option<PathBuf> {
+        self.plot_file.as_ref().map(|f| self.out_dir.join(f))
+    }
+
     /// Path of the table file in the given format.
     pub fn table_path(&self, format: TableFormat) -> PathBuf {
         self.out_dir
@@ -564,10 +581,13 @@ pub struct CentralityConfigBuilder {
     data_hist: Option<String>,
     out_dir: PathBuf,
     final_file: String,
-    n_classes: usize,
+    classes: Option<Vec<f64>>,
+    n_classes: Option<usize>,
     min_value: f64,
     table_formats: Vec<TableFormat>,
     table_name: String,
+    plot_file: Option<String>,
+    plot_title: Option<String>,
 }
 
 impl Default for CentralityConfigBuilder {
@@ -578,10 +598,13 @@ impl Default for CentralityConfigBuilder {
             data_hist: None,
             out_dir: PathBuf::from("."),
             final_file: "FINAL.root".into(),
-            n_classes: 10,
+            classes: None,
+            n_classes: None,
             min_value: 1.,
             table_formats: Vec::new(),
             table_name: "centrality_table".into(),
+            plot_file: Some("centrality_result.png".into()),
+            plot_title: None,
         }
     }
 }
@@ -618,8 +641,16 @@ impl CentralityConfigBuilder {
         self
     }
 
+    /// `n_classes` classes of equal width (default 10).
     pub fn n_classes(mut self, n_classes: usize) -> Self {
-        self.n_classes = n_classes;
+        self.n_classes = Some(n_classes);
+        self
+    }
+
+    /// Class edges in percent, e.g. `[0, 5, 10, 20, ..., 100]`, instead of
+    /// `n_classes` classes of equal width.
+    pub fn classes(mut self, edges: Vec<f64>) -> Self {
+        self.classes = Some(edges);
         self
     }
 
@@ -640,6 +671,18 @@ impl CentralityConfigBuilder {
         self
     }
 
+    /// PNG picture in `out_dir` (default `centrality_result.png`); `None`
+    /// for no picture.
+    pub fn plot_file(mut self, name: Option<String>) -> Self {
+        self.plot_file = name;
+        self
+    }
+
+    pub fn plot_title(mut self, title: impl Into<String>) -> Self {
+        self.plot_title = Some(title.into());
+        self
+    }
+
     pub fn build(self) -> Result<CentralityConfig> {
         let missing = |what: &str| Error::Config(format!("{what} is not set"));
         let qa_file = expand_home(&self.qa_file.ok_or_else(|| missing("QA file"))?);
@@ -647,17 +690,50 @@ impl CentralityConfigBuilder {
         let data_file = self
             .data_file
             .map_or_else(|| qa_file.clone(), |f| expand_home(&f));
-        if !(1..=MAX_CLASSES).contains(&self.n_classes) {
-            return Err(Error::Config(format!(
-                "n_classes must be in [1, {MAX_CLASSES}], got {}",
-                self.n_classes
-            )));
-        }
+        let class_edges = match (self.classes, self.n_classes) {
+            (Some(_), Some(_)) => {
+                return Err(Error::Config(
+                    "set either classes (edges in percent) or n_classes, not both".into(),
+                ));
+            }
+            (Some(edges), None) => {
+                if !(2..=MAX_CLASSES + 1).contains(&edges.len()) {
+                    return Err(Error::Config(format!(
+                        "classes needs 2 to {} edges, got {}",
+                        MAX_CLASSES + 1,
+                        edges.len()
+                    )));
+                }
+                if edges.windows(2).any(|w| !(w[0] < w[1])) {
+                    return Err(Error::Config(format!(
+                        "class edges must increase: {edges:?}"
+                    )));
+                }
+                if !(edges[0] >= 0. && edges[edges.len() - 1] <= 100.) {
+                    return Err(Error::Config(format!(
+                        "class edges must lie within [0, 100]: {edges:?}"
+                    )));
+                }
+                edges
+            }
+            (None, n) => {
+                let n = n.unwrap_or(10);
+                if !(1..=MAX_CLASSES).contains(&n) {
+                    return Err(Error::Config(format!(
+                        "n_classes must be in [1, {MAX_CLASSES}], got {n}"
+                    )));
+                }
+                (0..=n).map(|i| 100. * i as f64 / n as f64).collect()
+            }
+        };
         if !self.min_value.is_finite() {
             return Err(Error::Config(format!(
                 "min_value must be finite, got {}",
                 self.min_value
             )));
+        }
+        if self.plot_file.as_deref() == Some("") {
+            return Err(Error::Config("plot_file must not be empty".into()));
         }
         if self.final_file.is_empty() || self.table_name.is_empty() {
             return Err(Error::Config(
@@ -670,10 +746,12 @@ impl CentralityConfigBuilder {
             data_hist,
             out_dir: expand_home(&self.out_dir),
             final_file: self.final_file,
-            n_classes: self.n_classes,
+            class_edges,
             min_value: self.min_value,
             table_formats: self.table_formats,
             table_name: self.table_name,
+            plot_file: self.plot_file,
+            plot_title: self.plot_title,
         })
     }
 }
@@ -825,17 +903,57 @@ mod tests {
         .build()
         .unwrap();
         assert_eq!(c.data_file, PathBuf::from("qa.root"));
-        assert_eq!((c.n_classes, c.final_file.as_str()), (5, "FINAL.root"));
+        assert_eq!((c.n_classes(), c.final_file.as_str()), (5, "FINAL.root"));
+        assert_eq!(c.class_edges, [0., 20., 40., 60., 80., 100.]);
         assert_eq!(
             c.table_path(TableFormat::Cpp),
             PathBuf::from("./centrality_table.C")
         );
         assert_eq!(c.table_formats.len(), 3);
         assert_eq!(c.min_value, 1.);
+        assert_eq!(
+            c.plot_path(),
+            Some(PathBuf::from("./centrality_result.png"))
+        );
+        let c = CentralityConfigBuilder::from_ron_str(
+            r#"(centrality: (qa_file: "q", data_hist: "h", plot_file: None,
+                             plot_title: "BM@N, Xe+CsI"))"#,
+        )
+        .and_then(|b| b.build())
+        .unwrap();
+        assert_eq!(
+            (c.plot_path(), c.plot_title.as_deref()),
+            (None, Some("BM@N, Xe+CsI"))
+        );
 
         let parse = |s: &str| CentralityConfigBuilder::from_ron_str(s).and_then(|b| b.build());
         assert!(parse(r#"(centrality: (data_hist: "h"))"#).is_err());
         assert!(parse(r#"(centrality: (qa_file: "q", data_hist: "h", n_classes: 0))"#).is_err());
+        let c =
+            parse(r#"(centrality: (qa_file: "q", data_hist: "h", classes: [0, 5, 10, 30, 100]))"#)
+                .unwrap();
+        assert_eq!(c.class_edges, [0., 5., 10., 30., 100.]);
+        assert_eq!(c.n_classes(), 4);
+        assert_eq!(
+            parse(r#"(centrality: (qa_file: "q", data_hist: "h"))"#)
+                .unwrap()
+                .n_classes(),
+            10
+        );
+        for bad in [
+            "[0, 10, 5]",
+            "[0, 0, 10]",
+            "[0]",
+            "[-5, 10]",
+            "[0, 50, 101]",
+        ] {
+            let text = format!(r#"(centrality: (qa_file: "q", data_hist: "h", classes: {bad}))"#);
+            assert!(parse(&text).is_err(), "{bad}");
+        }
+        assert!(
+            parse(r#"(centrality: (qa_file: "q", data_hist: "h", classes: [0, 50, 100], n_classes: 2))"#)
+                .is_err()
+        );
         assert!(
             parse(r#"(centrality: (qa_file: "q", data_hist: "h", table_formats: [Pdf]))"#).is_err()
         );

@@ -18,6 +18,7 @@ pub mod fitter;
 pub mod glauber;
 pub mod mode;
 pub mod output;
+pub mod plot;
 
 pub use centrality::CentralityResult;
 pub use config::{
@@ -59,6 +60,7 @@ pub fn run_with_progress(
             model: &model,
             nbd: &nbd,
             result: &result,
+            config: fitter.config(),
         },
     )?;
     println!("Scan written to {}", scan_path.display());

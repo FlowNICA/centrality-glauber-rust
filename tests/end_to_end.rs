@@ -466,15 +466,28 @@ fn centrality_classes_from_the_fit() {
         .out_dir(&out_dir)
         .n_classes(10)
         .table_formats(vec![TableFormat::Csv, TableFormat::Tex, TableFormat::Cpp])
+        .plot_title("Toy, Au+Au")
         .build()
         .unwrap();
     let result = centrality::run(&config).unwrap();
+    let png = std::fs::read(config.plot_path().unwrap()).unwrap();
+    assert!(png.starts_with(b"\x89PNG") && png.len() > 10_000);
     print!("{}", result.plain_table());
     let classes = &result.classes;
     assert_eq!(classes.len(), 10);
 
     /* each class holds 10% of the single events, up to one boundary bin */
     let qa = FileReader::open(&qa_file).unwrap();
+    let summary = centrality_glauber_rust::plot::FitSummary::read(&qa).unwrap();
+    assert_eq!(
+        (
+            summary.mode.as_deref(),
+            summary.distribution.as_deref(),
+            summary.fit_method.as_deref()
+        ),
+        (Some("Default"), Some("Gamma"), Some("Chi2"))
+    );
+    assert_eq!(summary.k, TRUE_K);
     let single = TH1::read_root(&qa, "glaub_sng_histo").unwrap();
     let n_bins = single.xaxis.nbins as usize;
     let integral: f64 = single.contents[2..=n_bins].iter().sum();
@@ -548,6 +561,41 @@ fn centrality_classes_from_the_fit() {
     let cpp = std::fs::read_to_string(config.table_path(TableFormat::Cpp)).unwrap();
     assert!(cpp.contains("Int_t minMult [10]") && cpp.contains("GetCentMult"));
     assert!(config.table_path(TableFormat::Tex).exists());
+
+    /* classes of unequal width, not up to 100% */
+    let edges = [0., 5., 10., 20., 40., 60.];
+    let config = CentralityConfig::builder()
+        .qa_file(&qa_file)
+        .data(None, "hMult")
+        .out_dir(out_dir.join("unequal"))
+        .classes(edges.to_vec())
+        .build()
+        .unwrap();
+    let classes = centrality::run(&config).unwrap().classes;
+    let percents: Vec<_> = classes
+        .iter()
+        .map(|c| (c.min_percent, c.max_percent))
+        .collect();
+    assert_eq!(
+        percents,
+        [(0., 5.), (5., 10.), (10., 20.), (20., 40.), (40., 60.)]
+    );
+    for (i, c) in classes.iter().enumerate() {
+        let hi = if i == 0 { n_bins } else { c.bins.1 };
+        let fraction: f64 = single.contents[c.bins.0..=hi].iter().sum::<f64>() / integral;
+        let width = (c.max_percent - c.min_percent) / 100.;
+        assert!(
+            (fraction - width).abs() <= max_bin + 1e-9,
+            "class {}: fraction {fraction}",
+            c.label()
+        );
+    }
+    /* the multiplicities below 60% are not classified */
+    assert!(classes[4].min_border > 1.);
+    let fin = FileReader::open(config.final_path()).unwrap();
+    let h = TH1::read_root(&fin, "Npart_average_VS_Centrality").unwrap();
+    assert_eq!(h.xaxis.xbins, edges);
+    assert!(config.plot_path().unwrap().exists());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

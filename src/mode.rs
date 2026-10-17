@@ -68,6 +68,21 @@ impl Mode {
         }
     }
 
+    /// `Na` as a formula, e.g. for the plot.
+    pub fn formula(self) -> &'static str {
+        match self {
+            Mode::Default => "f·N_part + (1 − f)·N_coll",
+            Mode::Psd => "f − N_part",
+            Mode::Npart => "N_part^f",
+            Mode::Ncoll => "N_coll^f",
+            Mode::NpartFast => "N_part^f / 10^f",
+            Mode::NcollFast => "N_coll^f / 100^f",
+            Mode::Star => "(1 − f)·N_part/2 + f·N_coll",
+            Mode::Hades => "(1 − f·N_part²)·N_part",
+            Mode::Tof => "f + N_part",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Mode::Default => "Default",

@@ -50,6 +50,9 @@ pub struct QaOutput<'a> {
     pub model: &'a ModelHistograms,
     pub nbd: &'a TH1,
     pub result: &'a FitResult,
+    /// Settings of the fit, stored in `BestResult` (`mode`, `distribution`,
+    /// `fit_method`).
+    pub config: &'a FitConfig,
 }
 
 /// Writes the Glauber distributions, the data, the best fit histograms and
@@ -65,6 +68,12 @@ pub fn write_qa(path: &Path, qa: &QaOutput) -> Result<()> {
             Branch::f32("p", vec![best.p]),
             Branch::f32("chi2", vec![qa.result.chi2]),
             Branch::f32("chi2_error", vec![qa.result.chi2_error]),
+            Branch::strings("mode", vec![qa.config.mode.name().to_string()]),
+            Branch::strings(
+                "distribution",
+                vec![format!("{:?}", qa.config.distribution)],
+            ),
+            Branch::strings("fit_method", vec![format!("{:?}", qa.config.fit_method)]),
         ],
     );
 

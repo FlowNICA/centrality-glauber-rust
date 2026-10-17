@@ -3,7 +3,8 @@
 //!
 //! The classes are defined with the fitted model of single (non pile-up)
 //! events, `glaub_sng_histo`: counting from the highest multiplicity down,
-//! each class holds `1 / n_classes` of the single-event integral. For each
+//! each class holds its percent range (`classes`, or `1 / n_classes` each)
+//! of the single-event integral. For each
 //! class the Glauber observables `B`, `Npart` and `Ncoll` are averaged over
 //! the model events in its multiplicity range (`<name>_VS_Multiplicity`). The
 //! range of each observable in a class is the one of a sharp cut in that
@@ -33,8 +34,8 @@ pub struct ClassBins {
     pub pile_up_start: Option<usize>,
 }
 
-/// Splits the multiplicity bins into `n_classes` classes holding equal
-/// fractions of the single-event model.
+/// Splits the multiplicity bins into the classes between the percent `edges`
+/// (increasing within [0, 100]) of the single-event model.
 ///
 /// `single` and `pile_up` are the bin contents (with under- and overflow) of
 /// the single and pile-up event models. The bins before `first_bin` are not
@@ -42,14 +43,16 @@ pub struct ClassBins {
 /// pile-up events exceed the single events are excluded from the classes;
 /// their single events still count for the most central class. Counting from
 /// the highest multiplicity down, a bin belongs to the class in which its
-/// cumulative fraction (including the bin) falls.
+/// cumulative fraction (including the bin) falls; bins outside the edges
+/// (e.g. above 80% with edges up to 80) belong to no class.
 pub fn class_bins(
     single: &[f64],
     pile_up: &[f64],
     first_bin: usize,
-    n_classes: usize,
+    edges: &[f64],
 ) -> Result<ClassBins> {
     let first_bin = first_bin.max(1);
+    let n_classes = edges.len().saturating_sub(1);
     if single.len() < first_bin + 2 || n_classes == 0 {
         return Err(Error::Input("empty single-event model histogram".into()));
     }
@@ -68,9 +71,9 @@ pub fn class_bins(
         if pile_up_start.is_some_and(|start| bin >= start) {
             continue;
         }
-        let class = ((n_classes as f64 * cumulative / integral).ceil() as usize)
-            .saturating_sub(1)
-            .min(n_classes - 1);
+        let Some(class) = class_of(edges, 100. * cumulative / integral) else {
+            continue;
+        };
         let range = ranges[class].get_or_insert((bin, bin));
         range.0 = bin;
     }
@@ -214,7 +217,7 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
         &single.contents,
         &pile_up.contents,
         first_bin,
-        config.n_classes,
+        &config.class_edges,
     )?;
     let width = (axis.xmax - axis.xmin) / axis.nbins as f64;
     let edge = |bin: usize| axis.xmin + (bin - 1) as f64 * width;
@@ -224,16 +227,16 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
     }
 
     /* per-class averages of the observables */
-    let n = config.n_classes;
+    let edges = &config.class_edges;
     let mut classes = Vec::new();
     for (i, range) in class_bins.ranges.iter().enumerate() {
-        let (min_percent, max_percent) = class_percents(i, n);
+        let (min_percent, max_percent) = class_percents(edges, i);
         let Some((lo, hi)) = *range else {
             eprintln!(
                 "Warning: class {} is empty: a single multiplicity bin holds more than {}% \
-                 of the events; use fewer classes",
+                 of the events; use wider classes",
                 class_label(min_percent, max_percent),
-                100. / n as f64
+                percent(max_percent - min_percent)
             );
             continue;
         };
@@ -292,7 +295,7 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
         &result,
         &FinalInputs {
             class_bins: &class_bins,
-            n_classes: n,
+            edges,
             fit: &fit,
             data: &data,
             vs_multiplicity: &vs_multiplicity,
@@ -311,6 +314,21 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
         };
         std::fs::write(&path, text)?;
         println!("Table written to {}", path.display());
+    }
+    if let Some(path) = config.plot_path() {
+        /* the model and parameters in the header, if the QA file has them */
+        let summary = crate::plot::FitSummary::read(&qa)
+            .map_err(|e| eprintln!("Warning: no fit parameters in the plot: {e}"))
+            .ok();
+        crate::plot::write_plot(
+            &path,
+            &data,
+            &fit,
+            &result,
+            summary.as_ref(),
+            config.plot_title.as_deref(),
+        )?;
+        println!("Plot written to {}", path.display());
     }
     Ok(result)
 }
@@ -349,9 +367,22 @@ fn check_axes(single: &TH1, pile_up: &TH1, fit: &TH1, data: &TH1, vs: &[TH2]) ->
     Ok(())
 }
 
-/// Nominal percent range of class `i` of `n`.
-fn class_percents(i: usize, n: usize) -> (f64, f64) {
-    (100. * i as f64 / n as f64, 100. * (i + 1) as f64 / n as f64)
+/// Class `i` of the percent `edges` with `edges[i] < percent <= edges[i + 1]`
+/// (within rounding), or `None` outside the edges. 0% is in the first class
+/// if it starts at 0, and 100% (up to rounding) in the last if it ends at 100.
+fn class_of(edges: &[f64], percent: f64) -> Option<usize> {
+    const EPS: f64 = 1e-9;
+    let n = edges.len() - 1;
+    match edges.partition_point(|&e| e < percent - EPS) {
+        0 => (edges[0] <= 0.).then_some(0),
+        i if i <= n => Some(i - 1),
+        _ => (edges[n] >= 100.).then_some(n - 1),
+    }
+}
+
+/// Nominal percent range of class `i`.
+fn class_percents(edges: &[f64], i: usize) -> (f64, f64) {
+    (edges[i], edges[i + 1])
 }
 
 /// `%.1f%%-%.1f%%` as in the names of the original histograms.
@@ -458,7 +489,8 @@ fn mean_rms(h: &TH1) -> (f64, f64) {
 /// Inputs of the output ROOT file besides the result.
 struct FinalInputs<'a> {
     class_bins: &'a ClassBins,
-    n_classes: usize,
+    /// Class edges in percent.
+    edges: &'a [f64],
     fit: &'a TH1,
     data: &'a TH1,
     vs_multiplicity: &'a [TH2],
@@ -490,7 +522,8 @@ fn restricted(h: &TH1, name: &str, (lo, hi): (usize, usize)) -> TH1 {
 /// centrality, the per-class distributions of the observables, and the model
 /// and data multiplicity of each class.
 fn write_final(path: &Path, result: &CentralityResult, inputs: &FinalInputs) -> Result<()> {
-    let n = inputs.n_classes;
+    let edges = inputs.edges;
+    let n = edges.len() - 1;
     let classes = &result.classes;
 
     let column_f64 = |get: &dyn Fn(&CentralityClass) -> f64| classes.iter().map(get).collect();
@@ -531,9 +564,17 @@ fn write_final(path: &Path, result: &CentralityResult, inputs: &FinalInputs) -> 
     /* <observable> versus centrality, with the RMS as error */
     let mut averages = Vec::new();
     for (k, (name, label)) in OBSERVABLES.iter().enumerate() {
-        let mut h = Hist::reg(n as i32, 0., 100.)
-            .name(format!("{name}_average_VS_Centrality"))
-            .double();
+        /* uniform bins for equal classes over 0-100%, as in the original */
+        let equal = edges
+            .iter()
+            .enumerate()
+            .all(|(i, &e)| (e - 100. * i as f64 / n as f64).abs() < 1e-9);
+        let hist = if equal {
+            Hist::reg(n as i32, 0., 100.)
+        } else {
+            Hist::var(edges)
+        };
+        let mut h = hist.name(format!("{name}_average_VS_Centrality")).double();
         h.xaxis.title = "Centrality, %".into();
         h.yaxis.title = (*label).into();
         h.sumw2 = vec![0.; n + 2];
@@ -582,7 +623,7 @@ fn write_final(path: &Path, result: &CentralityResult, inputs: &FinalInputs) -> 
     vs_mult.sumw2.clear();
     for (i, range) in inputs.class_bins.ranges.iter().enumerate() {
         if let Some((lo, hi)) = *range {
-            let (_, max_percent) = class_percents(i, n);
+            let (_, max_percent) = class_percents(edges, i);
             vs_mult.contents[lo..=hi]
                 .iter_mut()
                 .for_each(|c| *c = max_percent);
@@ -602,7 +643,7 @@ fn write_final(path: &Path, result: &CentralityResult, inputs: &FinalInputs) -> 
 }
 
 /// Percent with the decimals only when needed, e.g. `10` or `12.5`.
-fn percent(p: f64) -> String {
+pub(crate) fn percent(p: f64) -> String {
     if (p - p.round()).abs() < 1e-9 {
         format!("{p:.0}")
     } else {
@@ -815,6 +856,49 @@ impl CentralityResult {
 mod tests {
     use super::*;
 
+    /// Edges of `n` classes of equal width.
+    fn equal(n: usize) -> Vec<f64> {
+        (0..=n).map(|i| 100. * i as f64 / n as f64).collect()
+    }
+
+    #[test]
+    fn class_of_percent() {
+        let edges = [0., 5., 10., 30., 100.];
+        assert_eq!(class_of(&edges, 0.), Some(0));
+        assert_eq!(class_of(&edges, 5.), Some(0));
+        assert_eq!(class_of(&edges, 5.000001), Some(1));
+        assert_eq!(class_of(&edges, 30.), Some(2));
+        assert_eq!(class_of(&edges, 100. + 1e-12), Some(3));
+        /* partial coverage: outside the edges no class */
+        let edges = [10., 20., 80.];
+        assert_eq!(class_of(&edges, 5.), None);
+        assert_eq!(class_of(&edges, 10.), None);
+        assert_eq!(class_of(&edges, 15.), Some(0));
+        assert_eq!(class_of(&edges, 80.), Some(1));
+        assert_eq!(class_of(&edges, 90.), None);
+    }
+
+    #[test]
+    fn classes_of_unequal_width() {
+        /* 100 bins of 1 event from bin 2: 0-5% is the top 5 bins, 5-10% the next 5, ... */
+        let mut values = vec![1000.];
+        values.extend([1.; 100]);
+        let (single, pile_up) = (contents(&values), contents(&[0.; 101]));
+        let bins = class_bins(&single, &pile_up, 2, &[0., 5., 10., 30., 100.]).unwrap();
+        assert_eq!(
+            bins.ranges,
+            vec![
+                Some((97, 101)),
+                Some((92, 96)),
+                Some((72, 91)),
+                Some((2, 71))
+            ]
+        );
+        /* only 10-30% and 30-80%: the top 10 and the bottom 20 bins are in no class */
+        let bins = class_bins(&single, &pile_up, 2, &[10., 30., 80.]).unwrap();
+        assert_eq!(bins.ranges, vec![Some((72, 91)), Some((22, 71))]);
+    }
+
     /// Contents with under/overflow from the in-range values.
     fn contents(values: &[f64]) -> Vec<f64> {
         let mut c = vec![0.];
@@ -828,7 +912,7 @@ mod tests {
         /* bin 1 (multiplicity 0) is ignored; 100 bins of 1 event */
         let mut values = vec![1000.];
         values.extend([1.; 100]);
-        let bins = class_bins(&contents(&values), &contents(&[0.; 101]), 2, 10).unwrap();
+        let bins = class_bins(&contents(&values), &contents(&[0.; 101]), 2, &equal(10)).unwrap();
         assert_eq!(bins.pile_up_start, None);
         /* class 0 holds the 10 highest bins 92..=101, the last class 2..=11 */
         for (i, range) in bins.ranges.iter().enumerate() {
@@ -841,7 +925,7 @@ mod tests {
     fn pile_up_tail_is_excluded_but_counted() {
         let single = contents(&[5., 4., 3., 2., 1., 0.5, 0.5]);
         let pile_up = contents(&[0., 0., 0., 0.1, 0.1, 1., 0.2]);
-        let bins = class_bins(&single, &pile_up, 2, 2).unwrap();
+        let bins = class_bins(&single, &pile_up, 2, &equal(2)).unwrap();
         /* from bin 6 on the pile-up exceeds the single events (also bin 7 is excluded) */
         assert_eq!(bins.pile_up_start, Some(6));
         /* integral of bins 2..=7 is 11: class 0 is <= 5.5 from the top: 0.5 + 0.5 + 1 + 2 */
@@ -851,13 +935,13 @@ mod tests {
     #[test]
     fn a_large_bin_leaves_classes_empty() {
         let single = contents(&[0., 1., 8., 1.]);
-        let bins = class_bins(&single, &contents(&[0.; 4]), 2, 5).unwrap();
+        let bins = class_bins(&single, &contents(&[0.; 4]), 2, &equal(5)).unwrap();
         /* 10%: bin 4, bin 3 reaches 90% (class 4), classes 1..=3 are empty */
         assert_eq!(
             bins.ranges,
             vec![Some((4, 4)), None, None, None, Some((2, 3))]
         );
-        assert!(class_bins(&contents(&[3., 0.]), &contents(&[0., 0.]), 2, 2).is_err());
+        assert!(class_bins(&contents(&[3., 0.]), &contents(&[0., 0.]), 2, &equal(2)).is_err());
     }
 
     #[test]
@@ -879,7 +963,13 @@ mod tests {
         assert_eq!(first_class_bin(&axis, 0.), 1);
         assert_eq!(first_class_bin(&axis, 0.25), 26);
         /* the first bin of the classes is used */
-        let bins = class_bins(&contents(&[1., 1., 1., 1.]), &contents(&[0.; 4]), 1, 4).unwrap();
+        let bins = class_bins(
+            &contents(&[1., 1., 1., 1.]),
+            &contents(&[0.; 4]),
+            1,
+            &equal(4),
+        )
+        .unwrap();
         assert_eq!(
             bins.ranges,
             vec![Some((4, 4)), Some((3, 3)), Some((2, 2)), Some((1, 1))]
