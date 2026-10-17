@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use centrality_glauber_rust::CentralityConfig;
 use clap::Parser;
@@ -15,6 +16,7 @@ struct Args {
 }
 
 fn main() -> ExitCode {
+    let start = Instant::now();
     let args = Args::parse();
     println!(
         "define-centrality: using configuration {}",
@@ -26,6 +28,7 @@ fn main() -> ExitCode {
         Ok(r) => {
             println!();
             print!("{}", r.plain_table());
+            println!("Total time: {:.1?}", start.elapsed());
             ExitCode::SUCCESS
         }
         Err(e) => {

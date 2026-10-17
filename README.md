@@ -100,9 +100,20 @@ per executable:
 
 ```sh
 cargo run --release --bin fit -- config.ron
+cargo run --release --bin define-centrality -- config.ron
 # or
 target/release/fit config.ron
+target/release/define-centrality config.ron
+# or both steps in one go
+target/release/run-all config.ron
 ```
+
+`run-all` runs `fit` and then `define-centrality` with the same file, which
+needs both sections. Both are read and checked before the fit starts, so an
+error in the `centrality` section does not waste a fit. The centrality step
+uses the QA file just written (`<out_dir>/glauber_qa.root` of the `fit`
+section): a different `qa_file` is replaced, with a warning, and so is
+`data_file` if it defaults to `qa_file`.
 
 ### Configuration
 

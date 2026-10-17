@@ -808,3 +808,72 @@ fn energy_fit_does_not_depend_on_units() {
     assert_eq!(borders[0], gev_classes.classes[0].min_border);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn run_all_fits_and_defines_centrality() {
+    let dir = temp_dir("run-all");
+    let (glauber, data) = write_inputs(&dir, 50_000, false);
+    let out_dir = dir.join("out");
+    /* qa_file elsewhere: run-all uses the QA file of the fit instead */
+    let config = dir.join("config.ron");
+    std::fs::write(
+        &config,
+        format!(
+            r#"(
+    fit: (
+        glauber_file: "{}", glauber_tree: "nt_toy",
+        data_file: "{}", data_hist: "hMult",
+        out_dir: "{}",
+        f: (min: 0.5, max: 0.5, step: 0), k: (min: 1.5, max: 1.5, step: 0),
+        p: (min: 0, max: 0, step: 0),
+        mult_min: 20, mult_max: 300, mode: "Default", n_iter: 10, seed: 1,
+    ),
+    centrality: (
+        qa_file: "{}/elsewhere/glauber_qa.root", data_hist: "hMult",
+        out_dir: "{}", classes: [0, 10, 20, 50, 100], table_formats: [Csv],
+    ),
+)"#,
+            glauber.display(),
+            data.display(),
+            out_dir.display(),
+            dir.display(),
+            out_dir.display()
+        ),
+    )
+    .unwrap();
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_run-all"))
+        .arg(&config)
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr),
+    );
+    assert!(run.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("is not the file written by the fit"),
+        "{stderr}"
+    );
+    assert!(stdout.contains("== fit") && stdout.contains("== define-centrality"));
+    assert!(stdout.contains("50 - 100"), "{stdout}");
+    for file in [
+        "glauber_qa.root",
+        "FINAL.root",
+        "centrality_table.csv",
+        "centrality_result.png",
+    ] {
+        assert!(out_dir.join(file).exists(), "{file}");
+    }
+
+    /* a bad centrality section stops run-all before the fit */
+    std::fs::remove_dir_all(&out_dir).unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, text.replace("[0, 10, 20, 50, 100]", "[0, 50, 20]")).unwrap();
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_run-all"))
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(!run.status.success());
+    assert!(!out_dir.join("glauber_qa.root").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

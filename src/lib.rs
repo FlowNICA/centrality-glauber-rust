@@ -11,6 +11,7 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod centrality;
+pub mod cli;
 pub mod config;
 pub mod config_file;
 pub mod error;
