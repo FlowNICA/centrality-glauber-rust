@@ -156,6 +156,12 @@ pub struct CentralityResult {
     pub classes: Vec<CentralityClass>,
     /// Lower multiplicity edge of the pile-up dominated tail, if any.
     pub pile_up_border: Option<f64>,
+    /// Efficiency: integral of the data over integral of the fit
+    /// (`glaub_fit_histo`), over the multiplicity bins the class percents
+    /// refer to (from `min_value` on). The fit is normalized to the data in
+    /// the fit range and extrapolated below it, so this is the fraction of
+    /// the events that were recorded. NaN if the fit is empty there.
+    pub efficiency: f64,
     /// QA file the classes were determined from.
     pub source: PathBuf,
 }
@@ -284,9 +290,22 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
             (s.min, s.max) = (a.min(b), a.max(b));
         }
     }
+    /* data / fit over the bins the percents refer to (the data and model bins match) */
+    let integral = |h: &TH1| -> f64 {
+        let n = h.xaxis.nbins.max(0) as usize;
+        h.contents.get(first_bin..=n).map_or(0., |c| c.iter().sum())
+    };
+    let fit_integral = integral(&fit);
+    let efficiency = if fit_integral > 0. {
+        integral(&data) / fit_integral
+    } else {
+        f64::NAN
+    };
+    println!("Efficiency (data / fit): {:.2}%", 100. * efficiency);
     let result = CentralityResult {
         classes,
         pile_up_border,
+        efficiency,
         source: config.qa_file.clone(),
     };
     std::fs::create_dir_all(&config.out_dir)?;
@@ -1021,6 +1040,7 @@ mod tests {
         let result = CentralityResult {
             classes: vec![class(1, (40., 120.)), class(2, (1., 40.))],
             pile_up_border: None,
+            efficiency: 1.,
             source: "qa.root".into(),
         };
         let csv = result.csv_table();
@@ -1054,6 +1074,7 @@ mod tests {
         let result = CentralityResult {
             classes: vec![class(1, (2.49, 7.640000000000001)), class(2, (0., 2.49))],
             pile_up_border: None,
+            efficiency: 1.,
             source: "qa.root".into(),
         };
         assert!(!result.integer_borders());

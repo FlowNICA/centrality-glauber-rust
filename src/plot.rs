@@ -180,6 +180,9 @@ impl Font {
     fn at(self, h: HPos, v: VPos) -> Self {
         Font { h, v, ..self }
     }
+    fn color(self, color: RGBColor) -> Self {
+        Font { color, ..self }
+    }
     /// Rotated by 90°, read from bottom to top.
     fn vertical(self) -> Self {
         Font {
@@ -737,7 +740,7 @@ fn draw(
             .at(HPos::Center, VPos::Center),
     )?;
 
-    /* header and legend */
+    /* header, legend and efficiency */
     for (i, line) in header.iter().enumerate() {
         canvas.text(
             line,
@@ -758,6 +761,16 @@ fn draw(
     canvas.text("data", (data_x, legend_y), legend_font)?;
     canvas.marker((fit_x - 25, legend_y), 7, FIT_COLOR, Marker::Square)?;
     canvas.text("fit", (fit_x, legend_y), legend_font)?;
+    if result.efficiency.is_finite() {
+        canvas.text(
+            &format!("Eff = {:.2} %", 100. * result.efficiency),
+            (RIGHT - 30, legend_y + 70),
+            Font::new(HEADER_SIZE)
+                .bold()
+                .color(FIT_COLOR)
+                .at(HPos::Right, VPos::Center),
+        )?;
+    }
     Ok(())
 }
 

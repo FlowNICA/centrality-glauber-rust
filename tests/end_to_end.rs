@@ -476,6 +476,48 @@ fn centrality_classes_from_the_fit() {
     let classes = &result.classes;
     assert_eq!(classes.len(), 10);
 
+    /*
+     * Efficiency data / fit: the toy records all events (up to the fit's
+     * extrapolation below the fit range); with half of the data below the fit
+     * range lost, where the fit is unchanged, it drops by exactly the lost
+     * counts over the fit integral
+     */
+    assert!(
+        (result.efficiency - 1.).abs() < 0.03,
+        "efficiency {}",
+        result.efficiency
+    );
+    let qa = FileReader::open(&qa_file).unwrap();
+    let fit_integral: f64 = {
+        let fit = TH1::read_root(&qa, "glaub_fit_histo").unwrap();
+        fit.contents[2..=fit.xaxis.nbins as usize].iter().sum()
+    };
+    let mut inefficient = TH1::read_root(&qa, "hMult").unwrap();
+    let mut lost = 0.;
+    for c in &mut inefficient.contents[2..=20] {
+        lost += *c / 2.;
+        *c /= 2.;
+    }
+    inefficient.sumw2.clear();
+    let inefficient_path = dir.join("inefficient.root");
+    inefficient
+        .write_root(&inefficient_path, Compression::None)
+        .unwrap();
+    let inefficient_config = CentralityConfig::builder()
+        .qa_file(&qa_file)
+        .data(Some(inefficient_path), "hMult")
+        .out_dir(dir.join("inefficient"))
+        .n_classes(10)
+        .build()
+        .unwrap();
+    let inefficient_result = centrality::run(&inefficient_config).unwrap();
+    assert!(
+        (inefficient_result.efficiency - (result.efficiency - lost / fit_integral)).abs() < 1e-9,
+        "efficiency {} -> {}, lost {lost} of {fit_integral}",
+        result.efficiency,
+        inefficient_result.efficiency
+    );
+
     /* each class holds 10% of the single events, up to one boundary bin */
     let qa = FileReader::open(&qa_file).unwrap();
     let summary = centrality_glauber_rust::plot::FitSummary::read(&qa).unwrap();

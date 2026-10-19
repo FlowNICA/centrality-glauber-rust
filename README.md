@@ -288,7 +288,14 @@ the data and the best fit (`glaub_fit_histo`) on a logarithmic scale, with the
 class borders and labels, and the ratio data / fit below. The header shows
 `plot_title`, `Na` and the per-ancestor distribution as formulas, and the fitted
 parameters with χ²/ndf (or −2lnλ/ndf). QA files from older versions have no
-fit settings, so only the parameters are shown. The picture is drawn in pure
+fit settings, so only the parameters are shown. Under the legend, `Eff` shows
+the efficiency: the integral of the data divided by the integral of the fit,
+both over the multiplicities that the class percents refer to (from
+`min_value` on). The fit is normalized to the data in the fit range and
+extrapolated below it, so `Eff` is the fraction of all events that were
+recorded, as with `normalization: Free` in centrality-inverse-bayes-rust. Its
+accuracy depends on how well the model describes the data below the fit range.
+`define-centrality` also prints it. The picture is drawn in pure
 Rust ([plotters](https://crates.io/crates/plotters)) with the embedded
 Liberation Sans font (`data/fonts`, SIL Open Font License), so no system
 libraries are needed.
