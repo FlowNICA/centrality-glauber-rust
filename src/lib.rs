@@ -24,7 +24,7 @@ pub mod plot;
 pub use centrality::CentralityResult;
 pub use config::{
     CentralityConfig, CentralityConfigBuilder, Distribution, FitConfig, FitConfigBuilder,
-    FitMethod, ScanRange, TableFormat,
+    FitMethod, MultPlot, ScanRange, TableFormat,
 };
 pub use error::{Error, Result};
 pub use fitter::{FitParams, FitProgress, FitResult, Fitter, ModelHistograms, ScanPoint};

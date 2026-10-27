@@ -15,6 +15,7 @@ use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
 use crate::centrality::{CentralityResult, percent};
+use crate::config::MultPlot;
 use crate::error::{Error, Result};
 use crate::mode::Mode;
 
@@ -27,8 +28,11 @@ const RIGHT: i32 = 1160;
 const TOP: i32 = 20;
 const SPLIT: i32 = 690;
 const BOTTOM: i32 = 890;
-/// Lowest value of the logarithmic axis, so that bins with one count show.
+/// Default lowest value of the logarithmic axis, so that bins with one
+/// count show.
 const Y_MIN: f64 = 0.4;
+/// Default range of the ratio data / fit (lowered if the ratio is lower).
+const RATIO_RANGE: (f64, f64) = (0.45, 1.55);
 /// Top of the first header line below the frame, clear of the ticks.
 const HEADER_OFFSET: i32 = 28;
 /// Text sizes in pixels.
@@ -364,15 +368,15 @@ fn tick_label(v: f64, step: f64) -> String {
 }
 
 /// Writes the picture of the data `data`, the fit `fit` (`glaub_fit_histo`)
-/// and the classes `result` to `path`; `title` (e.g. experiment and colliding
-/// system) starts the header, followed by the model and the fit parameters.
+/// and the classes `result` to `path`, with the titles, ranges and class
+/// borders of `opts`.
 pub fn write_plot(
     path: &Path,
     data: &TH1,
     fit: &TH1,
     result: &CentralityResult,
     summary: Option<&FitSummary>,
-    title: Option<&str>,
+    opts: &MultPlot,
 ) -> Result<()> {
     if data.xaxis.nbins < 1 {
         return Err(Error::Input("empty data histogram".into()));
@@ -381,7 +385,7 @@ pub fn write_plot(
     let root = BitMapBackend::new(path, (WIDTH, HEIGHT)).into_drawing_area();
     root.fill(&WHITE).map_err(plot_error)?;
     let canvas = Canvas { area: &root };
-    draw(&canvas, data, &Bins::new(data, fit), result, summary, title)?;
+    draw(&canvas, data, &Bins::new(data, fit), result, summary, opts)?;
     root.present().map_err(plot_error)?;
     Ok(())
 }
@@ -447,7 +451,7 @@ fn draw(
     data: &Bins,
     result: &CentralityResult,
     summary: Option<&FitSummary>,
-    title: Option<&str>,
+    opts: &MultPlot,
 ) -> Result<()> {
     let model = &data.model;
     let n_bins = data.n_bins();
@@ -458,13 +462,18 @@ fn draw(
         .rev()
         .find(|&i| data.counts[i] > 0. || model[i] >= 1.)
         .unwrap_or(n_bins - 1);
-    let x_lo = data.edges[0];
-    let x_hi = data.edges[last + 1] + 0.05 * (data.edges[last + 1] - x_lo);
+    let (x_lo, x_hi) = opts.x_range.unwrap_or_else(|| {
+        let lo = data.edges[0];
+        (
+            lo,
+            data.edges[last + 1] + 0.05 * (data.edges[last + 1] - lo),
+        )
+    });
 
     /* header lines, then the y range with room for them above the data */
     let header_font = Font::new(HEADER_SIZE);
     let mut items = Vec::new();
-    if let Some(t) = title.filter(|t| !t.is_empty()) {
+    if let Some(t) = opts.title.as_deref().filter(|t| !t.is_empty()) {
         items.push(t.to_string());
     }
     if let Some(summary) = summary {
@@ -482,13 +491,16 @@ fn draw(
     }
     let line_height = (HEADER_SIZE as f64 * 1.3) as i32;
     let header_bottom = TOP + HEADER_OFFSET + line_height * header.len() as i32;
-    let y_max = (0..n_bins)
-        .map(|i| (data.counts[i] + data.errors[i]).max(model[i]))
-        .fold(1., f64::max);
-    /* the data maximum sits 30 pixels below the header */
-    let free = (SPLIT - header_bottom - 30).max(100) as f64 / (SPLIT - TOP) as f64;
-    let decades = (y_max / Y_MIN).log10() / free;
-    let y_hi = Y_MIN * 10f64.powf(decades);
+    let (y_lo, y_hi) = opts.y_range.unwrap_or_else(|| {
+        let y_max = (0..n_bins)
+            .filter(|&i| center(i) >= x_lo && center(i) <= x_hi)
+            .map(|i| (data.counts[i] + data.errors[i]).max(model[i]))
+            .fold(1., f64::max);
+        /* the data maximum sits 30 pixels below the header */
+        let free = (SPLIT - header_bottom - 30).max(100) as f64 / (SPLIT - TOP) as f64;
+        (Y_MIN, Y_MIN * 10f64.powf((y_max / Y_MIN).log10() / free))
+    });
+    let decades = (y_hi / y_lo).log10();
 
     let x_axis = |p_lo, p_hi| Axis {
         lo: x_lo,
@@ -499,7 +511,7 @@ fn draw(
     };
     let x = x_axis(LEFT, RIGHT);
     let y = Axis {
-        lo: Y_MIN,
+        lo: y_lo,
         hi: y_hi,
         p_lo: SPLIT,
         p_hi: TOP,
@@ -518,14 +530,14 @@ fn draw(
         .zip(&data.counts)
         .filter_map(|(r, &c)| r.filter(|_| c >= 10.).map(|(v, _)| v))
         .fold(f64::INFINITY, f64::min);
-    let r_lo = if lowest < 0.5 {
-        ((lowest - 0.05) * 10.).floor().max(0.) / 10.
+    let (r_lo, r_hi) = opts.ratio_range.unwrap_or(if lowest < 0.5 {
+        (((lowest - 0.05) * 10.).floor().max(0.) / 10., RATIO_RANGE.1)
     } else {
-        0.45
-    };
+        RATIO_RANGE
+    });
     let r = Axis {
         lo: r_lo,
-        hi: 1.55,
+        hi: r_hi,
         p_lo: BOTTOM,
         p_hi: SPLIT,
         log: false,
@@ -536,7 +548,7 @@ fn draw(
     let class_font = Font::new(CLASS_SIZE)
         .vertical()
         .at(HPos::Center, VPos::Center);
-    let label_y = y.pixel(Y_MIN * 10f64.powf(0.3 * decades));
+    let label_y = y.pixel(y_lo * 10f64.powf(0.3 * decades));
     let bin_of = |v: f64| {
         data.edges
             .partition_point(|&e| e <= v)
@@ -544,6 +556,9 @@ fn draw(
             .min(n_bins - 1)
     };
     for (k, c) in classes.iter().enumerate() {
+        if !opts.class_borders {
+            break;
+        }
         /*
          * The most peripheral class extends to the lowest multiplicity and the
          * most central one is open above, if the classes cover 0-100%. The
@@ -564,7 +579,7 @@ fn draw(
             if x.contains(border) {
                 let px = x.pixel(border);
                 let top = y.clamp(model[bin_of(border)].max(data.counts[bin_of(border)]));
-                canvas.line((px, y.pixel(Y_MIN)), (px, y.pixel(top)), BLACK, 2)?;
+                canvas.line((px, y.pixel(y_lo)), (px, y.pixel(top)), BLACK, 2)?;
             }
         }
         let lo = if open_below {
@@ -620,10 +635,15 @@ fn draw(
     }
 
     /* the ratio */
-    let one = r.pixel(1.);
-    canvas.line((LEFT, one), (RIGHT, one), BLACK, 2)?;
-    canvas.dotted(LEFT, RIGHT, r.pixel(0.9))?;
-    canvas.dotted(LEFT, RIGHT, r.pixel(1.1))?;
+    if r.contains(1.) {
+        let one = r.pixel(1.);
+        canvas.line((LEFT, one), (RIGHT, one), BLACK, 2)?;
+    }
+    for v in [0.9, 1.1] {
+        if r.contains(v) {
+            canvas.dotted(LEFT, RIGHT, r.pixel(v))?;
+        }
+    }
     for (i, ratio) in ratios.iter().enumerate() {
         let Some((v, e)) = *ratio else { continue };
         if !x.contains(center(i)) {
@@ -660,10 +680,10 @@ fn draw(
             label_font.at(HPos::Center, VPos::Top),
         )?;
     }
-    let x_title = if hist.xaxis.title.is_empty() {
-        hist.name.as_str()
-    } else {
-        hist.xaxis.title.as_str()
+    let x_title = match &opts.x_title {
+        Some(t) => t.as_str(),
+        None if hist.xaxis.title.is_empty() => hist.name.as_str(),
+        None => hist.xaxis.title.as_str(),
     };
     canvas.text(
         x_title,
@@ -673,7 +693,7 @@ fn draw(
 
     /* logarithmic y axis: decades with labels, minor ticks between */
     let exponent_font = Font::new(LABEL_SIZE * 3 / 5).bold();
-    let (k_lo, k_hi) = (Y_MIN.log10().floor() as i32, y_hi.log10().floor() as i32);
+    let (k_lo, k_hi) = (y_lo.log10().floor() as i32, y_hi.log10().floor() as i32);
     for k in k_lo..=k_hi {
         for m in 1..10 {
             let v = m as f64 * 10f64.powi(k);
@@ -695,9 +715,11 @@ fn draw(
                     let e = k.to_string();
                     let (ew, _) = canvas.text_size(&e, exponent_font)?;
                     canvas.text("10", (LEFT - 14 - ew, py), at)?;
+                    /* raised, but inside the picture at the top of the axis */
+                    let ey = (py - LABEL_SIZE as i32 / 2).max(LABEL_SIZE as i32 * 3 / 10 + 2);
                     canvas.text(
                         &e,
-                        (LEFT - 12 - ew, py - LABEL_SIZE as i32 / 2),
+                        (LEFT - 12 - ew, ey),
                         exponent_font.at(HPos::Left, VPos::Center),
                     )?;
                 }
@@ -705,7 +727,7 @@ fn draw(
         }
     }
     canvas.text(
-        "dN",
+        &opts.y_title,
         (24, TOP + 10),
         Font::new(LABEL_SIZE + 6)
             .vertical()
@@ -733,7 +755,7 @@ fn draw(
         )?;
     }
     canvas.text(
-        "data/fit",
+        &opts.ratio_title,
         (24, (SPLIT + BOTTOM) / 2),
         Font::new(LABEL_SIZE - 2)
             .vertical()

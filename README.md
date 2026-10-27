@@ -217,8 +217,7 @@ cargo run --release --bin define-centrality -- config.ron
         min_value: 1.0,                     // bins below are not classified; 0 for energy
         table_formats: [Csv],               // any of Tex, Csv, Cpp
         table_name: "centrality_table",     // <table_name>.tex/.csv/.C in out_dir
-        plot_file: "centrality_result.png", // PNG picture in out_dir; None: no picture
-        // plot_title: "BM@N Run8, Xe+CsI", // first line of the picture's header
+        mult_plot: (file: "centrality_result.png"), // None: no picture
     ),
 ```
 
@@ -281,12 +280,12 @@ The table is always printed to stdout. `FINAL.root` in `out_dir` contains:
 - `Centrality_vs_Multiplicity`: the upper percent of the class of each
   multiplicity bin.
 
-`plot_file` (in `out_dir`) is a PNG picture of the result, in the style of the
+`mult_plot` (in `out_dir`) is a PNG picture of the result, in the style of the
 ROOT canvases of the C++ framework (and of
 [centrality-inverse-bayes-rust](https://github.com/FlowNICA/centrality-inverse-bayes-rust)):
 the data and the best fit (`glaub_fit_histo`) on a logarithmic scale, with the
-class borders and labels, and the ratio data / fit below. The header shows
-`plot_title`, `Na` and the per-ancestor distribution as formulas, and the fitted
+class borders and labels, and the ratio data / fit below. The header shows the
+`title`, `Na` and the per-ancestor distribution as formulas, and the fitted
 parameters with χ²/ndf (or −2lnλ/ndf). QA files from older versions have no
 fit settings, so only the parameters are shown. Under the legend, `Eff` shows
 the efficiency: the integral of the data divided by the integral of the fit,
@@ -298,7 +297,26 @@ accuracy depends on how well the model describes the data below the fit range.
 `define-centrality` also prints it. The picture is drawn in pure
 Rust ([plotters](https://crates.io/crates/plotters)) with the embedded
 Liberation Sans font (`data/fonts`, SIL Open Font License), so no system
-libraries are needed.
+libraries are needed. Its options, all optional (`mult_plot: None` writes no
+picture):
+
+```ron
+mult_plot: (
+    file: "centrality_result.png",   // in out_dir
+    title: "BM@N Run8, Xe+Cs(I)",    // beginning of the header
+    x_title: "N_ch",                 // default: x title of the data histogram, or its name
+    y_title: "dN",
+    ratio_title: "data/fit",         // y title of the ratio
+    class_borders: true,             // vertical lines and names of the classes
+    x_range: (0, 300),               // default: up to the last bin with data or fit
+    y_range: (0.4, 1e6),             // logarithmic; default: from 0.4, with room for the header
+    ratio_range: (0.45, 1.55),       // default: 0.45-1.55, lower if the ratio is
+),
+```
+
+The titles are plain text: Greek letters and superscripts such as `χ²`
+render (Liberation Sans has no subscript characters), while the ROOT `#chi`
+and `_{...}` markup is not interpreted.
 
 ## Library use
 
@@ -350,7 +368,7 @@ executable, read it with `config_file::read_section::<YourConfig>(path, "name")`
   `mu·(1 + mu/k)` Gamma, whose result depends on the units of a continuous
   observable (see [Model](#model)).
 - `define-centrality` fixes several bugs in the macros it replaces. Instead of
-  ROOT canvases and PDFs, it draws one PNG picture (`plot_file`):
+  ROOT canvases and PDFs, it draws one PNG picture (`mult_plot`):
   - `HistoCut.C` assigns bins with a running sum that it resets to 0 at each
     class boundary. The boundary bin's events are therefore never counted, and
     the bin at the start of the most peripheral class belongs to no class. Its

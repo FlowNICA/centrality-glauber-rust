@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use centrality_glauber_rust::Distribution as MultDistribution;
-use centrality_glauber_rust::{FitConfig, FitMethod, FitResult, Mode};
+use centrality_glauber_rust::{FitConfig, FitMethod, FitResult, Mode, MultPlot};
 use oxiroot::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -466,7 +466,13 @@ fn centrality_classes_from_the_fit() {
         .out_dir(&out_dir)
         .n_classes(10)
         .table_formats(vec![TableFormat::Csv, TableFormat::Tex, TableFormat::Cpp])
-        .plot_title("Toy, Au+Au")
+        .mult_plot(Some(MultPlot {
+            title: Some("Toy, Au+Au".into()),
+            x_title: Some("N_ch".into()),
+            x_range: Some((0., 300.)),
+            y_range: Some((0.5, 1e7)),
+            ..Default::default()
+        }))
         .build()
         .unwrap();
     let result = centrality::run(&config).unwrap();

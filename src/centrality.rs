@@ -334,19 +334,12 @@ pub fn run(config: &CentralityConfig) -> Result<CentralityResult> {
         std::fs::write(&path, text)?;
         println!("Table written to {}", path.display());
     }
-    if let Some(path) = config.plot_path() {
+    if let (Some(plot), Some(path)) = (&config.mult_plot, config.plot_path()) {
         /* the model and parameters in the header, if the QA file has them */
         let summary = crate::plot::FitSummary::read(&qa)
             .map_err(|e| eprintln!("Warning: no fit parameters in the plot: {e}"))
             .ok();
-        crate::plot::write_plot(
-            &path,
-            &data,
-            &fit,
-            &result,
-            summary.as_ref(),
-            config.plot_title.as_deref(),
-        )?;
+        crate::plot::write_plot(&path, &data, &fit, &result, summary.as_ref(), plot)?;
         println!("Plot written to {}", path.display());
     }
     Ok(result)

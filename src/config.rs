@@ -527,9 +527,88 @@ pub struct CentralityConfig {
     pub table_name: String,
     /// PNG picture of the data, the fit, data / fit and the class borders in
     /// `out_dir`; `None` for no picture.
-    pub plot_file: Option<String>,
-    /// Title starting the header of the picture, e.g. experiment and system.
-    pub plot_title: Option<String>,
+    pub mult_plot: Option<MultPlot>,
+}
+
+/// The picture of the data distribution, the fit and the classes written by
+/// `define-centrality`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MultPlot {
+    /// File name in `out_dir`.
+    #[serde(default = "default_plot_file")]
+    pub file: String,
+    /// Beginning of the header, e.g. the experiment and the colliding system.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Title of the x axis; default: that of the data histogram, or its name.
+    #[serde(default)]
+    pub x_title: Option<String>,
+    /// Title of the y axis of the distribution.
+    #[serde(default = "default_y_title")]
+    pub y_title: String,
+    /// Title of the y axis of the ratio data / fit.
+    #[serde(default = "default_ratio_title")]
+    pub ratio_title: String,
+    /// Draw the class borders (vertical lines) and the class names.
+    #[serde(default = "default_true")]
+    pub class_borders: bool,
+    /// Range of the x axis; default: the histogram up to the last bin with
+    /// data or fit.
+    #[serde(default)]
+    pub x_range: Option<(f64, f64)>,
+    /// Range of the (logarithmic) y axis; default: from 0.4, with room for
+    /// the header above the data.
+    #[serde(default)]
+    pub y_range: Option<(f64, f64)>,
+    /// Range of the y axis of the ratio; default: 0.45 to 1.55, lower if the
+    /// ratio is.
+    #[serde(default)]
+    pub ratio_range: Option<(f64, f64)>,
+}
+
+impl Default for MultPlot {
+    fn default() -> Self {
+        MultPlot {
+            file: default_plot_file(),
+            title: None,
+            x_title: None,
+            y_title: default_y_title(),
+            ratio_title: default_ratio_title(),
+            class_borders: true,
+            x_range: None,
+            y_range: None,
+            ratio_range: None,
+        }
+    }
+}
+
+impl MultPlot {
+    pub fn validate(&self) -> Result<()> {
+        let err = |m: String| Err(Error::Config(format!("mult_plot: {m}")));
+        if self.file.trim().is_empty() {
+            return err("file must not be empty".into());
+        }
+        for (name, range) in [
+            ("x_range", self.x_range),
+            ("y_range", self.y_range),
+            ("ratio_range", self.ratio_range),
+        ] {
+            if let Some((lo, hi)) = range
+                && !(lo < hi && lo.is_finite() && hi.is_finite())
+            {
+                return err(format!("{name}: ({lo}, {hi}) must be increasing"));
+            }
+        }
+        if let Some((lo, _)) = self.y_range
+            && !(lo > 0.)
+        {
+            return err(format!(
+                "y_range must start above 0 (logarithmic axis), got {lo}"
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl CentralityConfig {
@@ -560,7 +639,7 @@ impl CentralityConfig {
 
     /// Path of the PNG picture, if any.
     pub fn plot_path(&self) -> Option<PathBuf> {
-        self.plot_file.as_ref().map(|f| self.out_dir.join(f))
+        self.mult_plot.as_ref().map(|p| self.out_dir.join(&p.file))
     }
 
     /// Path of the table file in the given format.
@@ -586,8 +665,7 @@ pub struct CentralityConfigBuilder {
     min_value: f64,
     table_formats: Vec<TableFormat>,
     table_name: String,
-    plot_file: Option<String>,
-    plot_title: Option<String>,
+    mult_plot: Option<MultPlot>,
 }
 
 impl Default for CentralityConfigBuilder {
@@ -603,8 +681,7 @@ impl Default for CentralityConfigBuilder {
             min_value: 1.,
             table_formats: Vec::new(),
             table_name: "centrality_table".into(),
-            plot_file: Some("centrality_result.png".into()),
-            plot_title: None,
+            mult_plot: Some(MultPlot::default()),
         }
     }
 }
@@ -671,15 +748,10 @@ impl CentralityConfigBuilder {
         self
     }
 
-    /// PNG picture in `out_dir` (default `centrality_result.png`); `None`
-    /// for no picture.
-    pub fn plot_file(mut self, name: Option<String>) -> Self {
-        self.plot_file = name;
-        self
-    }
-
-    pub fn plot_title(mut self, title: impl Into<String>) -> Self {
-        self.plot_title = Some(title.into());
+    /// PNG picture in `out_dir` with the options of [`MultPlot`] (default
+    /// file `centrality_result.png`); `None` for no picture.
+    pub fn mult_plot(mut self, plot: Option<MultPlot>) -> Self {
+        self.mult_plot = plot;
         self
     }
 
@@ -732,8 +804,8 @@ impl CentralityConfigBuilder {
                 self.min_value
             )));
         }
-        if self.plot_file.as_deref() == Some("") {
-            return Err(Error::Config("plot_file must not be empty".into()));
+        if let Some(plot) = &self.mult_plot {
+            plot.validate()?;
         }
         if self.final_file.is_empty() || self.table_name.is_empty() {
             return Err(Error::Config(
@@ -750,8 +822,7 @@ impl CentralityConfigBuilder {
             min_value: self.min_value,
             table_formats: self.table_formats,
             table_name: self.table_name,
-            plot_file: self.plot_file,
-            plot_title: self.plot_title,
+            mult_plot: self.mult_plot,
         })
     }
 }
@@ -762,6 +833,19 @@ pub(crate) fn expand_home(path: &Path) -> PathBuf {
         (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => path.to_path_buf(),
     }
+}
+
+fn default_plot_file() -> String {
+    "centrality_result.png".into()
+}
+fn default_y_title() -> String {
+    "dN".into()
+}
+fn default_ratio_title() -> String {
+    "data/fit".into()
+}
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -890,6 +974,46 @@ mod tests {
         assert_eq!(pts.len(), 51);
         assert!((pts[50] - 1.0).abs() < 1e-5);
     }
+
+    #[test]
+    fn mult_plot_options() {
+        let parse = |plot: &str| {
+            let text = format!(r#"(centrality: (qa_file: "q", data_hist: "h", {plot}))"#);
+            CentralityConfigBuilder::from_ron_str(&text).and_then(|b| b.build())
+        };
+        /* default: a picture with the default options */
+        let c = parse("").unwrap();
+        assert_eq!(c.mult_plot, Some(MultPlot::default()));
+        assert_eq!(
+            c.plot_path(),
+            Some(PathBuf::from("./centrality_result.png"))
+        );
+        assert_eq!(parse("mult_plot: None").unwrap().plot_path(), None);
+        let c = parse(
+            r#"mult_plot: (file: "p.png", title: "Toy", x_title: "N_{ch}", y_title: "counts",
+                ratio_title: "ratio", class_borders: false, x_range: (0, 300),
+                y_range: (0.5, 1e6), ratio_range: (0.8, 1.2))"#,
+        )
+        .unwrap();
+        let p = c.mult_plot.unwrap();
+        assert_eq!(p.file, "p.png");
+        assert_eq!(p.title.as_deref(), Some("Toy"));
+        assert_eq!(p.x_title.as_deref(), Some("N_{ch}"));
+        assert_eq!(p.y_title, "counts");
+        assert_eq!(p.ratio_title, "ratio");
+        assert!(!p.class_borders);
+        assert_eq!(p.x_range, Some((0., 300.)));
+        assert_eq!(p.y_range, Some((0.5, 1e6)));
+        assert_eq!(p.ratio_range, Some((0.8, 1.2)));
+        /* invalid ranges, unknown fields, the former options */
+        assert!(parse("mult_plot: (x_range: (300, 0))").is_err());
+        assert!(parse("mult_plot: (y_range: (0, 1e6))").is_err());
+        assert!(parse("mult_plot: (colour: 1)").is_err());
+        assert!(parse(r#"mult_plot: (file: "")"#).is_err());
+        assert!(parse(r#"plot_file: "p.png""#).is_err());
+        assert!(parse(r#"plot_title: "p""#).is_err());
+    }
+
     #[test]
     fn centrality_config() {
         let c = CentralityConfigBuilder::from_ron_str(
@@ -916,14 +1040,20 @@ mod tests {
             Some(PathBuf::from("./centrality_result.png"))
         );
         let c = CentralityConfigBuilder::from_ron_str(
-            r#"(centrality: (qa_file: "q", data_hist: "h", plot_file: None,
-                             plot_title: "BM@N, Xe+CsI"))"#,
+            r#"(centrality: (qa_file: "q", data_hist: "h", mult_plot: None))"#,
+        )
+        .and_then(|b| b.build())
+        .unwrap();
+        assert_eq!(c.plot_path(), None);
+        let c = CentralityConfigBuilder::from_ron_str(
+            r#"(centrality: (qa_file: "q", data_hist: "h",
+                             mult_plot: (title: "BM@N, Xe+CsI")))"#,
         )
         .and_then(|b| b.build())
         .unwrap();
         assert_eq!(
-            (c.plot_path(), c.plot_title.as_deref()),
-            (None, Some("BM@N, Xe+CsI"))
+            c.mult_plot.as_ref().and_then(|p| p.title.as_deref()),
+            Some("BM@N, Xe+CsI")
         );
 
         let parse = |s: &str| CentralityConfigBuilder::from_ron_str(s).and_then(|b| b.build());
